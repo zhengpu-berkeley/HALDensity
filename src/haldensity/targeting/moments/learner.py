@@ -1,8 +1,8 @@
 import numpy as np
 import pandas as pd
 from typing import Union, Any
-from src.haldensity.targeting.base_target_learner import BaseTargetLearner
-from src.haldensity.utils.density_computations import generic_compute_moment_from_density
+from haldensity.targeting.base_target_learner import BaseTargetLearner
+from haldensity.utils.density_computations import generic_compute_moment_from_density
 
 
 def _compute_moment_from_density(targeted_fit: dict[str, Any], moment_order: int) -> float:

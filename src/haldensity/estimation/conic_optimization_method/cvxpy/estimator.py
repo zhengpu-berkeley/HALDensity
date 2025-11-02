@@ -2,8 +2,8 @@ import numpy as np
 import pandas as pd
 import cvxpy as cp
 from typing import Optional, Tuple
-from src.haldensity.utils.basis import create_basis_functions
-from src.haldensity.estimation.base_estimator import BaseEstimator
+from haldensity.utils.basis import create_basis_functions
+from haldensity.estimation.base_estimator import BaseEstimator
 
 
 class CVXPYEstimator(BaseEstimator):

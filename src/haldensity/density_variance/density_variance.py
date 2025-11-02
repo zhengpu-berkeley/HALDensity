@@ -3,7 +3,7 @@ import pandas as pd
 from scipy.stats import norm
 import warnings
 
-from src.haldensity.utils.basis import create_basis_functions
+from haldensity.utils.basis import create_basis_functions
 
 
 def estimate_covariance_beta(

@@ -1,10 +1,10 @@
 import numpy as np
 import pandas as pd
 from typing import Union, Any, Tuple
-from src.haldensity.targeting.base_target_learner import BaseTargetLearner
-from src.haldensity.targeting.cdf.targeting_basis import create_targeting_basis_functions
-from src.haldensity.utils.basis import create_basis_functions
-from src.haldensity.utils.density_computations import generic_compute_cdf_from_density
+from haldensity.targeting.base_target_learner import BaseTargetLearner
+from haldensity.targeting.cdf.targeting_basis import create_targeting_basis_functions
+from haldensity.utils.basis import create_basis_functions
+from haldensity.utils.density_computations import generic_compute_cdf_from_density
 
 
 def _compute_cdf_from_density(targeted_fit: dict[str, Any]) -> Tuple[np.ndarray, np.ndarray]:

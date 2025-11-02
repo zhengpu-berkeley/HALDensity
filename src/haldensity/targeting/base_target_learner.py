@@ -4,7 +4,7 @@ import pandas as pd
 import cvxpy as cp
 from typing import Union, Any, Optional
 from pydantic import BaseModel
-from src.haldensity.utils.basis import create_basis_functions
+from haldensity.utils.basis import create_basis_functions
 
 
 class TargetingResults(BaseModel):

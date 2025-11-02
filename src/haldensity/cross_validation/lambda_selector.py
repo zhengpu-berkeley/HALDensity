@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import KFold
 from typing import Optional, Type, Any
-from src.haldensity.estimation.base_estimator import BaseEstimator
+from haldensity.estimation.base_estimator import BaseEstimator
 from enum import Enum
 
 

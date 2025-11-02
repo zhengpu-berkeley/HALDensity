@@ -21,12 +21,16 @@ Or with pip:
 ```bash
 pip install -e .
 ```
+Or install directly from GitHub:
+```bash
+pip install "git+https://github.com/zhengpu-berkeley/HALDensity.git"
+```
 
 Quickstart
 ```python
 import numpy as np
 import pandas as pd
-from src.haldensity.estimation import CVXPYEstimator
+from haldensity.estimation import CVXPYEstimator
 
 # Simulated data on [0, 1]
 rng = np.random.default_rng(0)
@@ -48,7 +52,7 @@ model = est.get_common_results_model()
 
 Cross-Validation (Optuna)
 ```python
-from src.haldensity.cross_validation.optuna_hyperparam_selector import OptunaHyperparameterTuner
+from haldensity.cross_validation.optuna_hyperparam_selector import OptunaHyperparameterTuner
 tuner = OptunaHyperparameterTuner(
     'CVXPYEstimator', data, cv_folds=5, metric='sll', silent=True,
     param_overrides={"basis_order": [0, 2]}
@@ -59,7 +63,7 @@ best_est = tuner.fit_best_model()
 
 Targeted Learning (TMLE)
 ```python
-from src.haldensity.targeting import SurvivalTargetLearner
+from haldensity.targeting import SurvivalTargetLearner
 learner = SurvivalTargetLearner(norm_constraint=100, basis_order=0)
 targeted_fit = learner.run_m_step(
     uncensored_augmented=data,
