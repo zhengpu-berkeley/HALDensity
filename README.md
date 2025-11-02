@@ -152,14 +152,14 @@ Notes
 - For Moments, provide `x_moment` (integer power).
 - For Median, no additional arguments are needed beyond `old_theta` and the selected HAL grid.
 
-```
-
 Examples
+
 - `examples/example_density_estimator.ipynb`: quick demo of estimators
 - `examples/example_target_learning.ipynb`: targeting examples
 - `examples/example_case_study.ipynb`: real-data galaxy velocity case study
 
 Repository Structure
+
 ```
 
 src/haldensity/
@@ -173,15 +173,5 @@ local/setups/ # JSON configs for reproducible runs
 
 ```
 
-Notes
-- Numerical stability: density normalization uses midpoint Riemann sums with log-exp stabilization.
-- Estimators standardize outputs via `BaseEstimator._get_common_results()` and `CommonEstimatorResults`.
-- All math uses NumPy/SciPy; PyTorch has been removed.
-
 License
 MIT
-
-
-
-
-```
