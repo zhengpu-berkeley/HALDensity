@@ -2,8 +2,8 @@ import numpy as np
 import pandas as pd
 from scipy.special import logsumexp
 from typing import Optional
-from src.haldensity.utils.basis import create_basis_functions
-from src.haldensity.estimation.base_estimator import BaseEstimator
+from haldensity.utils.basis import create_basis_functions
+from haldensity.estimation.base_estimator import BaseEstimator
 
 
 class ProximalAdaGradEstimator(BaseEstimator):

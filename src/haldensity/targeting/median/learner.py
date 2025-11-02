@@ -1,9 +1,9 @@
 import numpy as np
 import pandas as pd
 from typing import Union, Any, Tuple
-from src.haldensity.targeting.base_target_learner import BaseTargetLearner
-from src.haldensity.estimation.base_estimator import BaseEstimator
-from src.haldensity.utils.density_computations import generic_compute_median_from_density
+from haldensity.targeting.base_target_learner import BaseTargetLearner
+from haldensity.estimation.base_estimator import BaseEstimator
+from haldensity.utils.density_computations import generic_compute_median_from_density
 
 N_POINTS = 2001
 DENSITY_EVAL_GRID = np.linspace(0, 1, N_POINTS)

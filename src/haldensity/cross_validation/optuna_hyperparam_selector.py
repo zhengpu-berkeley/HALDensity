@@ -33,7 +33,7 @@ warnings.filterwarnings('ignore', category=ConvergenceWarning)
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 # Import estimators
-from src.haldensity.estimation import (
+from haldensity.estimation import (
     CVXPYEstimator,
     FISTAEstimator,
     ProjectedGDEstimator,

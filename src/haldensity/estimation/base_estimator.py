@@ -5,7 +5,7 @@ import logging
 import os
 from scipy.interpolate import interp1d
 from pydantic import BaseModel
-from src.haldensity.utils.basis import create_basis_functions
+from haldensity.utils.basis import create_basis_functions
 
 EXPLOSION_THRESHOLD = 1e5  # Threshold for detecting numerical explosion in optimization
 LOGGER = logging.getLogger(__name__)
