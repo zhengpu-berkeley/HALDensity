@@ -1,9 +1,9 @@
-HALDensity Developer Guide
-==========================
+# HALDensity Developer Guide
 
 This document describes the internal structure of the `src/haldensity` package, the estimator base class, common result schema, and how to add a new estimator.
 
 Architecture
+
 ```
 haldensity/
   estimation/
@@ -19,6 +19,7 @@ haldensity/
 ```
 
 BaseEstimator
+
 - Provides logging, density evaluation, log-likelihood helpers, BIC.
 - Implements numerically stable density normalization on a midpoint grid.
 - Exposes standardized results via:
@@ -29,6 +30,7 @@ BaseEstimator
   - `get_results(self) -> dict` (can return `_get_common_results()` plus extras)
 
 CommonEstimatorResults (Pydantic)
+
 ```python
 class CommonEstimatorResults(BaseModel):
     fitted_theta_dict: Optional[dict[str, float]]
@@ -41,9 +43,11 @@ class CommonEstimatorResults(BaseModel):
     intercept: float
     hal_coeffs: list[float]
 ```
+
 Use `get_common_results_model()` for serialization and consistent downstream consumption.
 
 Adding a New Estimator
+
 1. Create a module under `estimation/<your_method>/estimator.py`.
 2. Subclass `BaseEstimator`.
 3. In `__init__`, call `super().__init__(basis_order=..., log_dir=..., log_frequency=..., tol=...)` and store method-specific params.
@@ -58,21 +62,16 @@ Adding a New Estimator
 6. Export your estimator from `estimation/__init__.py` and add a JSON config under `local/setups/` if desired.
 
 Basis Functions
+
 - Implemented in `utils/basis.py` as truncated power basis.
 - Order 0: `{1, I(x ≥ ξ_j)}`; Order k≥1: `{1, x, …, x^k, (x-ξ_j)_+^k}`.
 
 Numerical Notes
+
 - Density normalization uses midpoint Riemann sums with log-exp stabilization.
 - `calculate_density_at_points` accepts external normalization grids for consistency.
 
 Targeting (TMLE)
+
 - Learners in `targeting/` compute updated density estimates targeting functionals.
 - They consume `old_theta` and `grid_points_hal_selected` from the estimator results.
-
-Testing and Examples
-- See notebooks in `examples/` and configs in `local/setups/`.
-- A simple smoke test is available in `test.py` using uv: `uv run test.py`.
-
-
-
-
