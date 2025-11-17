@@ -158,6 +158,10 @@ Examples
 - `examples/example_target_learning.ipynb`: targeting examples
 - `examples/example_case_study.ipynb`: real-data galaxy velocity case study
 
+### Censored Data (Right-Censoring on [0,1])
+
+See `src/haldensity/censoring/README.md` for IPCW–HAL–MLE, EM with MI, censoring-aware CV, and metrics (incomplete-data log-likelihood, MI-pooled log-likelihood, KL divergence).
+
 Repository Structure
 
 ```
