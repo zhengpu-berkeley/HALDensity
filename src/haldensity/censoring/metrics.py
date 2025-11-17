@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from typing import Callable
+from typing import Any, Callable, Optional
 from haldensity.utils.density_computations import (
     generic_compute_survival_from_density,
 )
@@ -37,17 +37,45 @@ def incomplete_loglik(estimator, val_df: pd.DataFrame, time_col: str = "T", delt
     return float(np.sum(ll))
 
 
-def mi_complete_loglik(augmented_df: pd.DataFrame, time_col: str = "W1", replicate_col: str = "mi_rep") -> float:
+def mi_complete_loglik(
+    estimator: Any,
+    augmented_df: Optional[pd.DataFrame],
+    value_col: str = "W1",
+    weight_col: str = "weight",
+    min_density: float = 1e-12,
+) -> float:
     """
     MI-pooled complete-data log-likelihood proxy:
-      Average over replicates of the complete-data sum log f(x).
-    Expect augmented_df to include per-replicate densities or be accompanied by an estimator per replicate.
-    Here we assume uniform weights across pooled replicates and simply return 0 as placeholder unless
-    the caller computes per-replicate log-likelihoods. This function is included for API completeness.
+        Σ_j w_j log f_{θ}(x_j)
+
+    Parameters
+    ----------
+    estimator : BaseEstimator
+        Fitted estimator that exposes `get_density_at_points`.
+    augmented_df : pd.DataFrame | None
+        Pooled pseudo-complete data (e.g., output from `e_step_multiple_imputation`)
+        containing at least `value_col` and, optionally, `weight_col`.
+    value_col : str
+        Column with observation locations in [0, 1].
+    weight_col : str
+        Column of replicate weights (defaults to 1 if missing).
+    min_density : float
+        Lower bound used to stabilize log evaluations.
     """
-    # Placeholder simple proxy: not used in core tests; can be extended as needed by caller.
-    # Return 0 to avoid influencing selection if not explicitly used.
-    return 0.0
+    if augmented_df is None or augmented_df.empty:
+        return float("-inf")
+
+    values = np.asarray(augmented_df[value_col].values, dtype=float).ravel()
+    if weight_col in augmented_df.columns:
+        weights = np.asarray(augmented_df[weight_col].values, dtype=float).ravel()
+    else:
+        weights = np.ones_like(values)
+
+    densities = estimator.get_density_at_points(values)
+    densities = np.maximum(densities, min_density)
+    log_terms = np.log(densities)
+
+    return float(np.sum(weights * log_terms))
 
 
 def kl_divergence(true_pdf_fn: Callable[[np.ndarray], np.ndarray],

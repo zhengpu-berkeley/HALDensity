@@ -1,5 +1,7 @@
+from . import censoring
+
 __all__ = [
-    # subpackages are imported where needed
+    "censoring",
 ]
 
 __version__ = "0.1.0"

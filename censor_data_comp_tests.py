@@ -1,5 +1,8 @@
+import argparse
 import sys
 import time
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
 from scipy.stats import truncnorm
@@ -20,37 +23,85 @@ from haldensity.utils.density_computations import (
 )
 
 
-MEAN = 0.5
-STD = 0.1
-LOWER = 0.0
-UPPER = 1.0
-SEED = 12776
-N_SAMPLES = 1000
-N_GRID_POINTS = 200
-BEST_LAMBDA = 70.0
-M_STEP_NORM = 5 * BEST_LAMBDA
-BASIS_ORDER = 0
-M_IMPUTATIONS = 50  # Reduced from 400 for speed (legacy uses 400)
-MAX_EM_ITER = 5  # Reduced from 200 for speed (legacy converges in ~4 iters)
-EM_TOL = 0.01
-MAX_RUNTIME_SECONDS = 120.0  # Increased to 2 minutes given current performance
+@dataclass
+class Config:
+    mean: float = 0.5
+    std: float = 0.1
+    lower: float = 0.0
+    upper: float = 1.0
+    seed: int = 12776
+    n_samples: int = 1000
+    n_grid_points: int = 200
+    basis_order: int = 0
+    best_lambda: float = 70.0
+    m_step_norm: float = 350.0
+    m_imputations: int = 50
+    max_em_iter: int = 5
+    em_tol: float = 0.01
+    init_solver: str = "SCS"
+    m_step_solver: str = "ECOS"
+    e_step_n_grid: int = 1000
+    max_runtime_seconds: float = 120.0
+    use_sc_adjustment: bool = False
+    verbose_em: bool = True
 
 
-def generate_survival_data_from_dgp(n: int, rng: np.random.Generator) -> pd.DataFrame:
-    a, b = (LOWER - MEAN) / STD, (UPPER - MEAN) / STD
-    T = truncnorm.rvs(a, b, loc=MEAN, scale=STD, size=n, random_state=rng)
-    C = rng.uniform(0.0, 1.0, size=n)
+def parse_args() -> Config:
+    parser = argparse.ArgumentParser(
+        description="Censored-data regression test for HALDensity.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--seed", type=int, default=Config.seed)
+    parser.add_argument("--n-samples", type=int, default=Config.n_samples)
+    parser.add_argument("--n-grid-points", type=int, default=Config.n_grid_points)
+    parser.add_argument("--basis-order", type=int, default=Config.basis_order)
+    parser.add_argument("--best-lambda", type=float, default=Config.best_lambda)
+    parser.add_argument("--m-step-norm", type=float, default=None)
+    parser.add_argument("--m-imputations", type=int, default=Config.m_imputations)
+    parser.add_argument("--max-em-iter", type=int, default=Config.max_em_iter)
+    parser.add_argument("--em-tol", type=float, default=Config.em_tol)
+    parser.add_argument("--init-solver", type=str, default=Config.init_solver)
+    parser.add_argument("--m-step-solver", type=str, default=Config.m_step_solver)
+    parser.add_argument("--e-step-n-grid", type=int, default=Config.e_step_n_grid)
+    parser.add_argument("--max-runtime", type=float, default=Config.max_runtime_seconds)
+    parser.add_argument("--use-sc-adjustment", action="store_true")
+    parser.add_argument("--verbose-em", action="store_true", default=Config.verbose_em)
+    args = parser.parse_args()
+    m_step_norm = args.m_step_norm if args.m_step_norm is not None else 5.0 * args.best_lambda
+    return Config(
+        seed=args.seed,
+        n_samples=args.n_samples,
+        n_grid_points=args.n_grid_points,
+        basis_order=args.basis_order,
+        best_lambda=args.best_lambda,
+        m_step_norm=m_step_norm,
+        m_imputations=args.m_imputations,
+        max_em_iter=args.max_em_iter,
+        em_tol=args.em_tol,
+        init_solver=args.init_solver,
+        m_step_solver=args.m_step_solver,
+        e_step_n_grid=args.e_step_n_grid,
+        max_runtime_seconds=args.max_runtime,
+        use_sc_adjustment=args.use_sc_adjustment,
+        verbose_em=args.verbose_em,
+    )
+
+
+def _generate_data(cfg: Config, rng: np.random.Generator) -> pd.DataFrame:
+    a, b = (cfg.lower - cfg.mean) / cfg.std, (cfg.upper - cfg.mean) / cfg.std
+    T = truncnorm.rvs(a, b, loc=cfg.mean, scale=cfg.std, size=cfg.n_samples, random_state=rng)
+    C = rng.uniform(cfg.lower, cfg.upper, size=cfg.n_samples)
     T_tilde = np.minimum(T, C)
     delta = (T <= C).astype(int)
-    return pd.DataFrame({"T_tilde": T_tilde, "delta": delta})
+    return pd.DataFrame({"T": T_tilde, "Delta": delta})
 
 
-def true_density(grid: np.ndarray) -> np.ndarray:
-    a, b = (LOWER - MEAN) / STD, (UPPER - MEAN) / STD
-    return truncnorm.pdf(grid, a, b, loc=MEAN, scale=STD)
+def _true_density(cfg: Config, grid: np.ndarray) -> np.ndarray:
+    a, b = (cfg.lower - cfg.mean) / cfg.std, (cfg.upper - cfg.mean) / cfg.std
+    return truncnorm.pdf(grid, a, b, loc=cfg.mean, scale=cfg.std)
 
 
-def check_density_validity(estimator, name: str):
+def _check_density(estimator, name: str):
     grid, f = estimator.get_density()
     assert np.all(np.isfinite(f)), f"{name}: density has non-finite values"
     assert np.all(f >= 0), f"{name}: density has negatives"
@@ -61,23 +112,20 @@ def check_density_validity(estimator, name: str):
     else:
         delta[0] = 1.0
     integral = float(np.sum(f * delta))
-    assert abs(integral - 1.0) < 1e-2, f"{name}: density integral off: {integral}"
+    assert abs(integral - 1.0) < 1e-2, f"{name}: density integral {integral}"
     cdf, _ = generic_compute_cdf_from_density(grid, f)
     surv, _ = generic_compute_survival_from_density(grid, f)
     assert np.all(np.diff(cdf) >= -1e-8), f"{name}: CDF not monotone"
     assert np.all(np.diff(surv) <= 1e-8), f"{name}: Survival not monotone"
 
 
-def main():
-    import warnings
-    warnings.filterwarnings('ignore', category=UserWarning)
-    
+def main(cfg: Config | None = None):
+    cfg = cfg or parse_args()
     start = time.perf_counter()
-    print(f"Starting at {start:.2f}s")
-    
-    rng = np.random.default_rng(SEED)
-    raw = generate_survival_data_from_dgp(N_SAMPLES, rng)
-    data = pd.DataFrame({"T": raw["T_tilde"], "Delta": raw["delta"]})
+    print(f"Starting at {start:.2f}s (seed={cfg.seed})")
+
+    rng = np.random.default_rng(cfg.seed)
+    data = _generate_data(cfg, rng)
     print(f"Generated data at {time.perf_counter() - start:.2f}s")
 
     km = KaplanMeier().fit(data, time_col="T", delta_col="Delta")
@@ -87,34 +135,33 @@ def main():
     w_unc = w[mask_unc]
     print(f"Computed IPCW weights at {time.perf_counter() - start:.2f}s")
 
-    print("Fitting IPCW-HAL-MLE with SCS...")
+    print(f"Fitting IPCW-HAL-MLE with {cfg.init_solver}...")
     ipcw_est = WeightedCVXPYEstimator(
-        norm_constraint=BEST_LAMBDA,
-        basis_order=BASIS_ORDER,
-        n_grid_points=N_GRID_POINTS,
-        solver="SCS",  # Match legacy init
+        norm_constraint=cfg.best_lambda,
+        basis_order=cfg.basis_order,
+        n_grid_points=cfg.n_grid_points,
+        solver=cfg.init_solver,
         use_secondary_solver=False,
-        legacy_mode=True,
         include_intercept_in_constraint=True,
     ).fit(df_unc, sample_weights=w_unc)
     print(f"IPCW-HAL-MLE fitted at {time.perf_counter() - start:.2f}s")
 
     print("Fitting EM-IPCW-HAL-MLE...")
     em_est = EMIPCWEstimator(
-        norm_constraint=M_STEP_NORM,
-        basis_order=BASIS_ORDER,
-        n_grid_points=N_GRID_POINTS,
-        m_imputations=M_IMPUTATIONS,
-        max_em_iter=MAX_EM_ITER,
-        em_tol=EM_TOL,
-    use_sc_adjustment=False,
-        verbose=True,
-        init_solver="SCS",  # Match legacy init
-        m_step_solver="ECOS",  # Match legacy M-step
-        init_norm_constraint=BEST_LAMBDA,
-        m_step_norm_constraint=M_STEP_NORM,
-        e_step_n_grid=1000,
-        rng_seed=SEED,
+        norm_constraint=cfg.m_step_norm,
+        basis_order=cfg.basis_order,
+        n_grid_points=cfg.n_grid_points,
+        m_imputations=cfg.m_imputations,
+        max_em_iter=cfg.max_em_iter,
+        em_tol=cfg.em_tol,
+        use_sc_adjustment=cfg.use_sc_adjustment,
+        verbose=cfg.verbose_em,
+        init_solver=cfg.init_solver,
+        m_step_solver=cfg.m_step_solver,
+        init_norm_constraint=cfg.best_lambda,
+        m_step_norm_constraint=cfg.m_step_norm,
+        e_step_n_grid=cfg.e_step_n_grid,
+        rng_seed=cfg.seed,
     ).fit(data)
     print(f"EM-IPCW-HAL-MLE fitted at {time.perf_counter() - start:.2f}s")
 
@@ -125,19 +172,21 @@ def main():
 
     grid_ipcw, f_ipcw = ipcw_est.get_density()
     grid_em, f_em = em_est.get_density()
-    kl_ipcw = kl_divergence(true_density, grid_ipcw, f_ipcw)
-    kl_em = kl_divergence(true_density, grid_em, f_em)
+    kl_ipcw = kl_divergence(lambda pts: _true_density(cfg, pts), grid_ipcw, f_ipcw)
+    kl_em = kl_divergence(lambda pts: _true_density(cfg, pts), grid_em, f_em)
     print(f"KL Divergence (True vs. IPCW): {kl_ipcw}")
     print(f"KL Divergence (True vs. EM):   {kl_em}")
     assert kl_ipcw < 0.1, "KL(IPCW) too large"
     assert kl_em < 0.1, "KL(EM) too large"
 
-    check_density_validity(ipcw_est, "IPCW")
-    check_density_validity(em_est, "EM")
+    _check_density(ipcw_est, "IPCW")
+    _check_density(em_est, "EM")
 
     elapsed = time.perf_counter() - start
     print(f"\n✓ All censored-data tests passed in {elapsed:.2f} seconds.")
-    assert elapsed <= MAX_RUNTIME_SECONDS, f"Runtime {elapsed:.2f}s exceeded {MAX_RUNTIME_SECONDS}s budget"
+    assert elapsed <= cfg.max_runtime_seconds, (
+        f"Runtime {elapsed:.2f}s exceeded {cfg.max_runtime_seconds}s budget"
+    )
 
 
 if __name__ == "__main__":

@@ -1,30 +1,26 @@
 # HALDensity Censoring Fix – Implementation Notes
 
 ## Overview
-This document summarizes the work done to port the censored-data pipeline from the legacy notebook (`1O_CV_EM_IPCW_HAL_MLE.ipynb`/`legacy_em_ipcw_hal.py`) into the modular `haldensity.censoring` subpackage. The goal was to achieve identical behaviour—right-censored truncated-normal density estimation via IPCW initialization followed by EM with multiple imputation—while keeping runtime under a minute and matching the legacy KL divergence targets (<0.01 ideal, <0.1 required).
+This document summarizes the work done to port the censored-data pipeline from the original notebooks (`1O_CV_EM_IPCW_HAL_MLE.ipynb`, `ZO_CV_EM_IPCW_HAL_MLE.ipynb`) into the modular `haldensity.censoring` subpackage. The goal was to keep the statistical behaviour—right-censored truncated-normal density estimation via IPCW initialization followed by EM with multiple imputation—while running entirely on the lightweight HAL stack (no PyTorch) and matching the previous KL divergence targets (<0.01 ideal, <0.1 required).
 
 ## Key Fixes and Changes
-### 1. Legacy-Compatible Infrastructure
-- **`legacy_basis.py`** – Added basis generator that matches the notebook basis (no intercept column; intercept handled separately).
-- **`legacy_m_step.py`** – Ported the notebook’s convex M-step exactly (knot pruning, ECOS objective, solver fallback).
-- **`EMIPCWEstimator`** – Rewired to:
-  - Prune HAL knots each iteration, pass only active knots to the M-step, and warm-start on the reduced parameter vector.
-  - Delegate `get_density`/`get_density_at_points` to the latest `LegacyMStepResult` so downstream metrics use the same density grid as the legacy solver.
-  - Disable `use_sc_adjustment` by default; the legacy workflow never divides by Kaplan–Meier survival during imputation.
+### 1. Truncated-Basis Infrastructure
+- **Inline truncated basis** – The previous stand-alone basis helper was folded into `weighted_cvxpy_estimator.py` as `_truncated_design_matrix`, guaranteeing the exact same step-function basis (intercept plus `(x-ξ)+` columns) used in the notebooks.
+- **Weighted CVX estimator** – `WeightedCVXPYEstimator` now owns normalization, knot pruning, solver waterfalls, and exposes densities consistent with the truncated basis. It serves both IPCW initialization and the EM M-step.
+- **EM integration** – `EMIPCWEstimator` now delegates every optimization call to `WeightedCVXPYEstimator`, keeps warm-starts, and records the pseudo-complete data for downstream targeting and diagnostics.
 
 ### 2. IPCW + EM Behavioural Parity
-- **E-step (`sampling.py`)** – Restored the intercept term in the density used for imputation so that truncation sampling matches the notebook’s precomputation.
-- **M-step** – Replaced the general `WeightedCVXPYEstimator` call with the legacy M-step helper; this reduced per-iteration solve time from ~3 s to ~0.1 s and stopped the log-likelihood from drifting downward.
-- **`debug_compare_mstep.py`** – Added harness to run one EM iteration through both implementations, verifying theta lengths, active knots, and incomplete-data log-likelihood alignment.
+- **E-step (`sampling.py`)** – Sampling relies on the same truncated density evaluator, so multiple-imputation draws match those produced in the notebooks.
+- **M-step** – The pooled pseudo-complete data are now weighted and solved through the standard estimator instead of a bespoke solver class. This keeps solver selection, logging, and tolerance policies aligned with the rest of HALDensity.
+- **Regression harnesses** – `censor_data_comp_tests.py` became the canonical acceptance test (CLI-configurable), and `test_censored_complete.py`, `test_ipcw_only.py`, `test_minimal.py`, etc., provide progressively smaller checks.
 
-### 3. Tests and Benchmarks
-- **`test_censored_complete.py`** – Standalone integration test that mirrors the notebook’s data generation and solver settings (n=1000, `m_imputations=50`, `norm_constraint=350`, no survival adjustment). Runtime ~6 s; KL≈0.0103; LL grows monotonically.
-- **`censor_data_comp_tests.py`** – Root-level acceptance test invoked via `uv run censor_data_comp_tests.py` (with `gtimeout` enforcement). Currently passes with the same metrics as above.
-- Additional smoke tests: `test_ipcw_only.py`, `test_em_only.py`, `test_minimal.py`, `test_ultra_minimal.py`.
+### 3. Documentation and Cleanup
+- `README.md` and `src/haldensity/censoring/README.md` document the torch-free workflow, Optuna tuning options, and how to integrate the censored pipeline into notebooks.
+- `HALDENSITY_CLEANUP_GUIDE.md` explains how to remove temporary scripts/notebooks once you are satisfied with the port.
 
 ## Remaining Work / Observations
-- The new legacy M-step produces the same LL improvements as the notebook but STILL relies on CVXPY; further optimization (e.g. custom solver, caching) could cut runtime even more if needed.
-- Several helper scripts (`debug_compare_mstep.py`, test harnesses) live at the repo root. See `HALDENSITY_CLEANUP_GUIDE.md` for removal steps once they’re no longer needed.
+- CVXPY still dominates runtime; future speedups could come from caching basis evaluations, batching solves, or exploring specialized solvers.
+- Debug/acceptance scripts live at the repo root. Follow the cleanup guide when you are ready to trim them from production branches.
 
 ## Tests Executed (latest run)
 - `uv run test_censored_complete.py`

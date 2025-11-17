@@ -13,13 +13,12 @@ Delete the following files from the project root unless you plan to keep them fo
 - `debug_compare_mstep.py`
 - `censored_data_workflow.md` (if you no longer need the scratch notes)
 
-## 2. Notebook + Legacy Artifacts
-If the legacy files are no longer required in the repo (they live in version control history):
-- `legacy_em_ipcw_hal.py`
+## 2. Notebook + Archived Artifacts
+If the historical reference materials are no longer required (they live safely in Git history), remove the PyTorch driver script in the repo root together with the two censored-data notebooks:
 - `1O_CV_EM_IPCW_HAL_MLE.ipynb`
 - `ZO_CV_EM_IPCW_HAL_MLE.ipynb`
 
-Keep them only if you want to continue cross-checking behaviours; otherwise remove to prevent drift.
+Keep these files only if you plan to continue cross-checking against the original experiments; otherwise remove them to prevent drift.
 
 ## 3. Dependency Hygiene
 - Ensure `pyproject.toml` / `requirements` include `cvxpy`, `lifelines`, etc., if you run the tests in CI. Remove any ad‑hoc dependencies that were introduced only for debugging.

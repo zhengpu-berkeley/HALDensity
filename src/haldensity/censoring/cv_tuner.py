@@ -7,7 +7,7 @@ from .em_estimator import EMIPCWEstimator
 from .weighted_cvxpy_estimator import WeightedCVXPYEstimator
 from .km import KaplanMeier
 from .weights import compute_ipcw_weights
-from .metrics import incomplete_loglik
+from .metrics import incomplete_loglik, mi_complete_loglik
 
 
 ESTIMATORS = {
@@ -23,7 +23,7 @@ class CensoredOptunaHyperparameterTuner:
       - WeightedCVXPYEstimator (IPCW baseline)
     Metrics:
       - 'incomplete' (sum Δ log f + (1-Δ) log S)
-      - 'mi_complete' (placeholder, returns 0 unless user extends)
+      - 'mi_complete' (pseudo complete-data log-likelihood using pooled imputations)
     """
     def __init__(
         self,
@@ -38,13 +38,14 @@ class CensoredOptunaHyperparameterTuner:
     ):
         if estimator_name not in ESTIMATORS:
             raise ValueError(f"Unsupported estimator '{estimator_name}'. Available: {list(ESTIMATORS.keys())}")
-        if metric not in ["incomplete", "mi_complete"]:
+        metric_normalized = metric.lower()
+        if metric_normalized not in ["incomplete", "mi_complete"]:
             raise ValueError("metric must be 'incomplete' or 'mi_complete'")
         self.estimator_name = estimator_name
         self.estimator_class = ESTIMATORS[estimator_name]
         self.data = data.reset_index(drop=True)
         self.cv_folds = cv_folds
-        self.metric = metric
+        self.metric = metric_normalized
         self.random_state = random_state
         self.n_grid_points = n_grid_points
         self.param_overrides = param_overrides or {}
@@ -55,6 +56,30 @@ class CensoredOptunaHyperparameterTuner:
         self.study: Optional[optuna.Study] = None
         self.best_params: Optional[dict[str, Any]] = None
         self.best_metric_value: Optional[float] = None
+
+    def _optional_param(self, trial: optuna.Trial, name: str, default: Any) -> Any:
+        """
+        Resolve optional overrides for estimator-specific knobs.
+        """
+        override = self.param_overrides.get(name, default)
+        if isinstance(override, dict):
+            if "fixed" in override:
+                return override["fixed"]
+            if "choices" in override:
+                return trial.suggest_categorical(name, list(override["choices"]))
+            if "values" in override:
+                return trial.suggest_categorical(name, list(override["values"]))
+            if "low" in override and "high" in override:
+                low = override["low"]
+                high = override["high"]
+                if isinstance(default, int) and not isinstance(default, bool):
+                    return trial.suggest_int(name, int(low), int(high))
+                return trial.suggest_float(name, float(low), float(high), log=override.get("log", False))
+        if isinstance(override, (list, tuple)):
+            if len(override) == 1:
+                return override[0]
+            return trial.suggest_categorical(name, list(override))
+        return override
 
     def _suggest_params(self, trial: optuna.Trial) -> dict[str, Any]:
         ovr = self.param_overrides
@@ -85,7 +110,29 @@ class CensoredOptunaHyperparameterTuner:
             params.update({
                 "m_imputations": choose_int("m_imputations", m_imputations),
                 "max_em_iter": choose_int("max_em_iter", max_em_iter),
+                "use_sc_adjustment": self._optional_param(trial, "use_sc_adjustment", False),
+                "init_solver": self._optional_param(trial, "init_solver", "SCS"),
+                "m_step_solver": self._optional_param(trial, "m_step_solver", "ECOS"),
+                "init_norm_constraint": self._optional_param(trial, "init_norm_constraint", params["norm_constraint"]),
+                "m_step_norm_constraint": self._optional_param(trial, "m_step_norm_constraint", params["norm_constraint"]),
+                "e_step_n_grid": self._optional_param(trial, "e_step_n_grid", 1000),
+                "rng_seed": self._optional_param(trial, "rng_seed", self.random_state),
+                "em_tol": self._optional_param(trial, "em_tol", 1e-3),
+                "verbose": self._optional_param(trial, "verbose", False),
+                "log_frequency": self._optional_param(trial, "log_frequency", -1),
             })
+        elif self.estimator_name == "WeightedCVXPYEstimator":
+            params.update({
+                "solver": self._optional_param(trial, "solver", "SCS"),
+                "use_secondary_solver": self._optional_param(trial, "use_secondary_solver", False),
+                "include_intercept_in_constraint": self._optional_param(
+                    trial,
+                    "include_intercept_in_constraint",
+                    True,
+                ),
+                "max_threads": self._optional_param(trial, "max_threads", None),
+            })
+        params["tol"] = self._optional_param(trial, "tol", 1e-4)
         return params
 
     def _evaluate(self, params: dict[str, Any]) -> float:
@@ -101,26 +148,44 @@ class CensoredOptunaHyperparameterTuner:
                 unc = train_df.loc[train_df["Delta"] == 1, "T"].values
                 w_unc = w[train_df["Delta"].values == 1]
                 df_unc = pd.DataFrame({"W1": unc})
-                est = self.estimator_class(
-                    tol=1e-4,
-                    norm_constraint=params["norm_constraint"],
-                    n_grid_points=self.n_grid_points,
-                    basis_order=params["basis_order"],
-                ).fit(df_unc, sample_weights=w_unc)
+                est_kwargs = {
+                    "tol": params["tol"],
+                    "norm_constraint": params["norm_constraint"],
+                    "n_grid_points": self.n_grid_points,
+                    "basis_order": params["basis_order"],
+                    "solver": params.get("solver", "SCS"),
+                    "use_secondary_solver": params.get("use_secondary_solver", False),
+                    "include_intercept_in_constraint": params.get("include_intercept_in_constraint", True),
+                }
+                if params.get("max_threads") is not None:
+                    est_kwargs["max_threads"] = params["max_threads"]
+                est = self.estimator_class(**est_kwargs).fit(df_unc, sample_weights=w_unc)
             else:
-                est = self.estimator_class(
-                    tol=1e-4,
-                    norm_constraint=params["norm_constraint"],
-                    n_grid_points=self.n_grid_points,
-                    basis_order=params["basis_order"],
-                    m_imputations=params.get("m_imputations", 20),
-                    max_em_iter=params.get("max_em_iter", 50),
-                ).fit(train_df)
+                est_kwargs = {
+                    "tol": params["tol"],
+                    "norm_constraint": params["norm_constraint"],
+                    "n_grid_points": self.n_grid_points,
+                    "basis_order": params["basis_order"],
+                    "m_imputations": params.get("m_imputations", 20),
+                    "max_em_iter": params.get("max_em_iter", 50),
+                    "use_sc_adjustment": params.get("use_sc_adjustment", False),
+                    "init_solver": params.get("init_solver", "SCS"),
+                    "m_step_solver": params.get("m_step_solver", "ECOS"),
+                    "init_norm_constraint": params.get("init_norm_constraint", params["norm_constraint"]),
+                    "m_step_norm_constraint": params.get("m_step_norm_constraint", params["norm_constraint"]),
+                    "e_step_n_grid": params.get("e_step_n_grid", 1000),
+                    "rng_seed": params.get("rng_seed", self.random_state),
+                    "em_tol": params.get("em_tol", 1e-3),
+                    "verbose": params.get("verbose", False),
+                    "log_frequency": params.get("log_frequency", -1),
+                }
+                est = self.estimator_class(**est_kwargs).fit(train_df)
 
             if self.metric == "incomplete":
                 score = incomplete_loglik(est, val_df, time_col="T", delta_col="Delta")
             else:
-                score = 0.0  # placeholder
+                augmented = getattr(est, "uncensored_augmented_", None)
+                score = mi_complete_loglik(est, augmented)
             scores.append(score)
 
         # Optuna minimizes; we want to maximize log-likelihood
@@ -151,22 +216,39 @@ class CensoredOptunaHyperparameterTuner:
             unc = self.data.loc[self.data["Delta"] == 1, "T"].values
             w_unc = w[self.data["Delta"].values == 1]
             df_unc = pd.DataFrame({"W1": unc})
-            est = self.estimator_class(
-                tol=1e-4,
-                norm_constraint=params["norm_constraint"],
-                n_grid_points=self.n_grid_points,
-                basis_order=params["basis_order"],
-            ).fit(df_unc, sample_weights=w_unc)
+            est_kwargs = {
+                "tol": params.get("tol", 1e-4),
+                "norm_constraint": params["norm_constraint"],
+                "n_grid_points": self.n_grid_points,
+                "basis_order": params["basis_order"],
+                "solver": params.get("solver", "SCS"),
+                "use_secondary_solver": params.get("use_secondary_solver", False),
+                "include_intercept_in_constraint": params.get("include_intercept_in_constraint", True),
+            }
+            if params.get("max_threads") is not None:
+                est_kwargs["max_threads"] = params["max_threads"]
+            est = self.estimator_class(**est_kwargs).fit(df_unc, sample_weights=w_unc)
             return est
         else:
-            est = self.estimator_class(
-                tol=1e-4,
-                norm_constraint=params["norm_constraint"],
-                n_grid_points=self.n_grid_points,
-                basis_order=params["basis_order"],
-                m_imputations=params.get("m_imputations", 20),
-                max_em_iter=params.get("max_em_iter", 50),
-            ).fit(self.data)
+            est_kwargs = {
+                "tol": params.get("tol", 1e-4),
+                "norm_constraint": params["norm_constraint"],
+                "n_grid_points": self.n_grid_points,
+                "basis_order": params["basis_order"],
+                "m_imputations": params.get("m_imputations", 20),
+                "max_em_iter": params.get("max_em_iter", 50),
+                "use_sc_adjustment": params.get("use_sc_adjustment", False),
+                "init_solver": params.get("init_solver", "SCS"),
+                "m_step_solver": params.get("m_step_solver", "ECOS"),
+                "init_norm_constraint": params.get("init_norm_constraint", params["norm_constraint"]),
+                "m_step_norm_constraint": params.get("m_step_norm_constraint", params["norm_constraint"]),
+                "e_step_n_grid": params.get("e_step_n_grid", 1000),
+                "rng_seed": params.get("rng_seed", self.random_state),
+                "em_tol": params.get("em_tol", 1e-3),
+                "verbose": params.get("verbose", False),
+                "log_frequency": params.get("log_frequency", -1),
+            }
+            est = self.estimator_class(**est_kwargs).fit(self.data)
             return est
 
 

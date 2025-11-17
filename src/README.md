@@ -16,6 +16,7 @@ haldensity/
   targeting/                   # TMLE learners (survival, mean, median)
   density_variance/            # Variance and band utilities
   utils/                       # Basis, math helpers, DGPs
+  censoring/                   # Right-censored pipelines, IPCW/EM estimators, Optuna tuner
 ```
 
 BaseEstimator
