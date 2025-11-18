@@ -26,11 +26,12 @@ def build_hal_design(
         basis_names.append("Intercept")
 
     if order == 0:
+        # Order 0: Step functions {1, I(x >= ξ₁), I(x >= ξ₂), ..., I(x >= ξₘ)}
         if knots_arr.size > 0:
-            ramps = np.maximum(x[:, None] - knots_arr[None, :], 0.0)
+            indicators = (x[:, None] >= knots_arr[None, :]).astype(float)
             for idx, knot in enumerate(knots_arr):
-                basis_list.append(ramps[:, idx])
-                basis_names.append(f"(x - {knot:.6f})_+")
+                basis_list.append(indicators[:, idx])
+                basis_names.append(f"I(x >= {knot:.6f})")
         return np.column_stack(basis_list), basis_names
 
     for power in range(1, order + 1):

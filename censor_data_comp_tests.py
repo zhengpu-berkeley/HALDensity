@@ -33,7 +33,7 @@ class Config:
     n_samples: int = 1000
     n_grid_points: int = 200
     basis_order: int = 0
-    best_lambda: float = 70.0
+    best_lambda: float = 6.0
     m_step_norm: float = 350.0
     m_imputations: int = 50
     max_em_iter: int = 5
