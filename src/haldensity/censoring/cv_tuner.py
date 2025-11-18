@@ -108,7 +108,7 @@ class CensoredOptunaHyperparameterTuner:
             "norm_constraint": choose_float("norm_constraint", norm_constraint),
         }
         def _default_m_step_norm(norm_val: float, order_val: int) -> float:
-            return norm_val if order_val == 0 else 5.0 * norm_val
+            return 1.0 * norm_val if order_val == 0 else 5.0 * norm_val
         if self.estimator_name == "EMIPCWEstimator":
             params.update({
                 "m_imputations": choose_int("m_imputations", m_imputations),

@@ -70,7 +70,7 @@ def parse_args() -> Config:
     if args.m_step_norm is not None:
         m_step_norm = args.m_step_norm
     elif args.basis_order == 0:
-        m_step_norm = args.best_lambda
+        m_step_norm = 1.0 * args.best_lambda
     else:
         m_step_norm = 5.0 * args.best_lambda
     return Config(
