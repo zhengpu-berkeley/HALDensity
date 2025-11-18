@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from typing import Callable, Tuple
-from .design_utils import normalized_hal_density
+from haldensity.estimation.base_estimator import BaseEstimator
 
 
 def _precompute_sampling_components(
@@ -16,7 +16,7 @@ def _precompute_sampling_components(
     sc_clip: float = 1e-6,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     grid = np.linspace(0.0, 1.0, n_grid)
-    density, delta, _, _ = normalized_hal_density(
+    density, delta, _, _ = BaseEstimator.normalized_hal_density(
         grid=grid,
         theta_hat=theta_hat,
         basis_grid_points=basis_grid_points,

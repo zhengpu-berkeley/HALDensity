@@ -3,6 +3,7 @@ import pandas as pd
 from typing import Optional, Any
 import optuna
 from sklearn.model_selection import KFold
+from tqdm import tqdm
 from .em_estimator import EMIPCWEstimator
 from .weighted_cvxpy_estimator import WeightedCVXPYEstimator
 from .km import KaplanMeier
@@ -106,6 +107,8 @@ class CensoredOptunaHyperparameterTuner:
             "basis_order": choose_categorical("basis_order", basis_order),
             "norm_constraint": choose_float("norm_constraint", norm_constraint),
         }
+        def _default_m_step_norm(norm_val: float, order_val: int) -> float:
+            return norm_val if order_val == 0 else 5.0 * norm_val
         if self.estimator_name == "EMIPCWEstimator":
             params.update({
                 "m_imputations": choose_int("m_imputations", m_imputations),
@@ -114,7 +117,11 @@ class CensoredOptunaHyperparameterTuner:
                 "init_solver": self._optional_param(trial, "init_solver", "SCS"),
                 "m_step_solver": self._optional_param(trial, "m_step_solver", "ECOS"),
                 "init_norm_constraint": self._optional_param(trial, "init_norm_constraint", params["norm_constraint"]),
-                "m_step_norm_constraint": self._optional_param(trial, "m_step_norm_constraint", params["norm_constraint"]),
+                "m_step_norm_constraint": self._optional_param(
+                    trial,
+                    "m_step_norm_constraint",
+                    _default_m_step_norm(params["norm_constraint"], params["basis_order"]),
+                ),
                 "e_step_n_grid": self._optional_param(trial, "e_step_n_grid", 1000),
                 "rng_seed": self._optional_param(trial, "rng_seed", self.random_state),
                 "em_tol": self._optional_param(trial, "em_tol", 1e-3),
@@ -161,6 +168,10 @@ class CensoredOptunaHyperparameterTuner:
                     est_kwargs["max_threads"] = params["max_threads"]
                 est = self.estimator_class(**est_kwargs).fit(df_unc, sample_weights=w_unc)
             else:
+                def _resolve_m_step_norm(p: dict[str, Any]) -> float:
+                    if "m_step_norm_constraint" in p and p["m_step_norm_constraint"] is not None:
+                        return p["m_step_norm_constraint"]
+                    return p["norm_constraint"] if p["basis_order"] == 0 else 5.0 * p["norm_constraint"]
                 est_kwargs = {
                     "tol": params["tol"],
                     "norm_constraint": params["norm_constraint"],
@@ -172,7 +183,7 @@ class CensoredOptunaHyperparameterTuner:
                     "init_solver": params.get("init_solver", "SCS"),
                     "m_step_solver": params.get("m_step_solver", "ECOS"),
                     "init_norm_constraint": params.get("init_norm_constraint", params["norm_constraint"]),
-                    "m_step_norm_constraint": params.get("m_step_norm_constraint", params["norm_constraint"]),
+                    "m_step_norm_constraint": _resolve_m_step_norm(params),
                     "e_step_n_grid": params.get("e_step_n_grid", 1000),
                     "rng_seed": params.get("rng_seed", self.random_state),
                     "em_tol": params.get("em_tol", 1e-3),
@@ -193,7 +204,30 @@ class CensoredOptunaHyperparameterTuner:
 
     def optimize(self, n_trials: int = 50) -> dict[str, Any]:
         self.study = optuna.create_study(direction="minimize")
-        self.study.optimize(self._objective, n_trials=n_trials, show_progress_bar=False)
+        progress = tqdm(total=n_trials, desc="Censored Optuna", unit="trial")
+        best_metric = {"value": float("-inf")}
+
+        def _update_progress(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+            metric = -float(trial.value)
+            if metric > best_metric["value"]:
+                best_metric["value"] = metric
+            basis_order = trial.params.get("basis_order", "?")
+            progress.update(1)
+            progress.set_postfix({
+                "metric": f"{metric:.3f}",
+                "best": f"{best_metric['value']:.3f}",
+                "order": basis_order,
+            })
+
+        try:
+            self.study.optimize(
+                self._objective,
+                n_trials=n_trials,
+                show_progress_bar=False,
+                callbacks=[_update_progress],
+            )
+        finally:
+            progress.close()
         self.best_params = self.study.best_params.copy()
         self.best_metric_value = -self.study.best_value
         if not self.silent:
@@ -230,6 +264,10 @@ class CensoredOptunaHyperparameterTuner:
             est = self.estimator_class(**est_kwargs).fit(df_unc, sample_weights=w_unc)
             return est
         else:
+            def _resolve_m_step_norm(p: dict[str, Any]) -> float:
+                if "m_step_norm_constraint" in p and p["m_step_norm_constraint"] is not None:
+                    return p["m_step_norm_constraint"]
+                return p["norm_constraint"] if p["basis_order"] == 0 else 5.0 * p["norm_constraint"]
             est_kwargs = {
                 "tol": params.get("tol", 1e-4),
                 "norm_constraint": params["norm_constraint"],
@@ -241,7 +279,7 @@ class CensoredOptunaHyperparameterTuner:
                 "init_solver": params.get("init_solver", "SCS"),
                 "m_step_solver": params.get("m_step_solver", "ECOS"),
                 "init_norm_constraint": params.get("init_norm_constraint", params["norm_constraint"]),
-                "m_step_norm_constraint": params.get("m_step_norm_constraint", params["norm_constraint"]),
+                "m_step_norm_constraint": _resolve_m_step_norm(params),
                 "e_step_n_grid": params.get("e_step_n_grid", 1000),
                 "rng_seed": params.get("rng_seed", self.random_state),
                 "em_tol": params.get("em_tol", 1e-3),

@@ -5,7 +5,7 @@ import pandas as pd
 import cvxpy as cp
 from typing import Optional
 from haldensity.estimation.base_estimator import BaseEstimator
-from .design_utils import build_hal_design, normalized_hal_density
+from haldensity.utils.basis import create_basis_functions
 
 
 class WeightedCVXPYEstimator(BaseEstimator):
@@ -78,9 +78,10 @@ class WeightedCVXPYEstimator(BaseEstimator):
             )
         self._grid_points_hal = grid_points_hal
 
-        basis_array, basis_names = build_hal_design(
-            values=x,
-            knots=grid_points_hal,
+        df_x = pd.DataFrame({"W1": x})
+        basis_array, basis_names = create_basis_functions(
+            df_x,
+            grid_points_hal,
             order=self.basis_order,
             include_intercept=True,
         )
@@ -89,9 +90,10 @@ class WeightedCVXPYEstimator(BaseEstimator):
 
         grid_eval = np.linspace(0.0, 1.0, self.n_grid_points)
         grid_midpoints = (grid_eval[:-1] + grid_eval[1:]) / 2
-        basis_grid_array, _ = build_hal_design(
-            values=grid_midpoints,
-            knots=grid_points_hal,
+        df_mid = pd.DataFrame({"W1": grid_midpoints})
+        basis_grid_array, _ = create_basis_functions(
+            df_mid,
+            grid_points_hal,
             order=self.basis_order,
             include_intercept=True,
         )
@@ -177,7 +179,7 @@ class WeightedCVXPYEstimator(BaseEstimator):
 
         grid_eval_dense = np.linspace(0.0, 1.0, self.n_grid_points)
         grid_mid = (grid_eval_dense[:-1] + grid_eval_dense[1:]) / 2
-        density_mid, delta_mid, max_log, norm_const = normalized_hal_density(
+        density_mid, delta_mid, max_log, norm_const = BaseEstimator.normalized_hal_density(
             grid_mid,
             self.theta_hat,
             grid_points_hal,
@@ -197,14 +199,16 @@ class WeightedCVXPYEstimator(BaseEstimator):
     def _normalized_density(self, points: np.ndarray) -> np.ndarray:
         if self._norm_shift is None or self._norm_Z is None:
             raise RuntimeError("Estimator must be fitted before requesting density")
-        basis_eval, _ = build_hal_design(
-            values=points,
-            knots=self._grid_points_hal,
+        df_pts = pd.DataFrame({"W1": points})
+        basis_eval, _ = create_basis_functions(
+            df_pts,
+            self._grid_points_hal,
             order=self.basis_order,
             include_intercept=True,
         )
         log_eval = basis_eval @ self.theta_hat
-        return np.exp(log_eval - self._norm_shift) / self._norm_Z
+        shifted = np.clip(log_eval - self._norm_shift, -700, 700)
+        return np.exp(shifted) / self._norm_Z
 
     def get_density(self) -> tuple[np.ndarray, np.ndarray]:
         if not self.is_fitted or self._density_midpoints is None:

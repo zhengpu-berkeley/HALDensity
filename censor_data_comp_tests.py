@@ -33,10 +33,10 @@ class Config:
     n_samples: int = 1000
     n_grid_points: int = 200
     basis_order: int = 0
-    best_lambda: float = 6.0
-    m_step_norm: float = 350.0
+    best_lambda: float = 8.0
+    m_step_norm: float = None
     m_imputations: int = 50
-    max_em_iter: int = 5
+    max_em_iter: int = 15
     em_tol: float = 0.01
     init_solver: str = "SCS"
     m_step_solver: str = "ECOS"
@@ -67,7 +67,12 @@ def parse_args() -> Config:
     parser.add_argument("--use-sc-adjustment", action="store_true")
     parser.add_argument("--verbose-em", action="store_true", default=Config.verbose_em)
     args = parser.parse_args()
-    m_step_norm = args.m_step_norm if args.m_step_norm is not None else 5.0 * args.best_lambda
+    if args.m_step_norm is not None:
+        m_step_norm = args.m_step_norm
+    elif args.basis_order == 0:
+        m_step_norm = args.best_lambda
+    else:
+        m_step_norm = 5.0 * args.best_lambda
     return Config(
         seed=args.seed,
         n_samples=args.n_samples,

@@ -95,13 +95,16 @@ class EMIPCWEstimator(BaseEstimator):
         if self.verbose:
             print("Initializing IPCW-HAL-MLE...")
         init_est = self._init_ipcw(data)
+        self._debug_estimator_state("init-ipcw", init_est)
         self._current_estimator = init_est
+        self.theta_full_ = init_est.theta_hat.copy()
+        self.basis_full_ = init_est._grid_points_hal.copy()
         self.theta_subset_, self.active_knots_ = self._prune_theta(
-            init_est.theta_hat,
-            init_est._grid_points_hal,
+            self.theta_full_,
+            self.basis_full_,
         )
-        theta_basis_grid_points = self.active_knots_.copy()
-        self.theta_path_.append(self.theta_subset_.copy())
+        theta_basis_grid_points = self.basis_full_.copy()
+        self.theta_path_.append(self.theta_full_.copy())
 
         prev_ll = incomplete_loglik(init_est, data, time_col="T", delta_col="Delta")
         if self.verbose:
@@ -115,7 +118,7 @@ class EMIPCWEstimator(BaseEstimator):
             _t0 = _time.time()
             pooled = e_step_multiple_imputation(
                 data=data,
-                theta_hat=self.theta_subset_,
+                theta_hat=self.theta_full_,
                 basis_grid_points=theta_basis_grid_points,
                 basis_order=self.basis_order,
                 S_c_predict=self.km_.predict if self.km_ is not None else (lambda x: np.ones_like(x)),
@@ -126,17 +129,21 @@ class EMIPCWEstimator(BaseEstimator):
             )
             e_time = _time.time() - _t0
             self.uncensored_augmented_ = pooled
+            self._debug_pooled_data(em_iter + 1, pooled)
 
             _t1 = _time.time()
             mstep_est = self._fit_weighted_m_step(pooled)
             m_time = _time.time() - _t1
             self._current_estimator = mstep_est
+            self.theta_full_ = mstep_est.theta_hat.copy()
+            self.basis_full_ = mstep_est._grid_points_hal.copy()
             self.theta_subset_, self.active_knots_ = self._prune_theta(
-                mstep_est.theta_hat,
-                mstep_est._grid_points_hal,
+                self.theta_full_,
+                self.basis_full_,
             )
-            theta_basis_grid_points = self.active_knots_.copy()
-            self.theta_path_.append(self.theta_subset_.copy())
+            theta_basis_grid_points = self.basis_full_.copy()
+            self.theta_path_.append(self.theta_full_.copy())
+            self._debug_estimator_state(f"m-step-{em_iter + 1}", mstep_est)
 
             curr_ll = incomplete_loglik(mstep_est, data, time_col="T", delta_col="Delta")
             ll_diff = np.abs(curr_ll - prev_ll)
@@ -236,3 +243,50 @@ class EMIPCWEstimator(BaseEstimator):
         pruned[:knot_start] = theta[:knot_start]
         pruned[knot_start:] = truncated[mask]
         return pruned, active_knots
+
+    def _debug_estimator_state(self, label: str, estimator: BaseEstimator) -> None:
+        if not self.verbose:
+            return
+        try:
+            theta = estimator.theta_hat
+            if theta is None:
+                print(f"[DEBUG][{label}] theta is None")
+                return
+            theta = np.asarray(theta, dtype=float)
+            non_finite = np.logical_not(np.isfinite(theta)).sum()
+            l1 = float(np.sum(np.abs(theta)))
+            knots = getattr(estimator, "_grid_points_hal", None)
+            n_knots = len(knots) if knots is not None else 0
+            sel = getattr(estimator, "grid_points_hal_selected", None)
+            n_sel = len(sel) if sel is not None else 0
+            print(
+                f"[DEBUG][{label}] theta stats: shape={theta.shape}, "
+                f"min={theta.min():.4f}, max={theta.max():.4f}, "
+                f"mean={theta.mean():.4f}, l1={l1:.4f}, non_finite={non_finite}, "
+                f"knots={n_knots}, selected_knots={n_sel}"
+            )
+            grid, density = estimator.get_density()
+            delta = BaseEstimator._integration_widths(grid)
+            integral = float(np.sum(density * delta))
+            print(
+                f"[DEBUG][{label}] density stats: min={density.min():.4e}, "
+                f"max={density.max():.4e}, integral={integral:.6f}"
+            )
+        except Exception as exc:
+            print(f"[DEBUG][{label}] unable to compute diagnostics: {exc}")
+
+    def _debug_pooled_data(self, em_iter: int, pooled_df: pd.DataFrame) -> None:
+        if not self.verbose or pooled_df is None or pooled_df.empty:
+            return
+        weights = pooled_df["weight"].values.astype(float)
+        values = pooled_df["W1"].values.astype(float)
+        unc_mask = np.isclose(weights, 1.0)
+        unc_min = float(values[unc_mask].min()) if np.any(unc_mask) else float("nan")
+        cen_mask = ~unc_mask
+        cen_min = float(values[cen_mask].min()) if np.any(cen_mask) else float("nan")
+        print(
+            f"[DEBUG][E-step-{em_iter}] pooled samples={len(values)}, "
+            f"weight_sum={weights.sum():.4f}, weight_range=({weights.min():.4e}, {weights.max():.4e}), "
+            f"value_range=({values.min():.4f}, {values.max():.4f}), "
+            f"unc_min={unc_min:.4f}, cens_min={cen_min:.4f}"
+        )
