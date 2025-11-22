@@ -177,7 +177,7 @@ class WeightedCVXPYEstimator(BaseEstimator):
         else:
             self.grid_points_hal_selected = np.array([])
 
-        grid_eval_dense = np.linspace(0.0, 1.0, self.n_grid_points)
+        grid_eval_dense = np.linspace(0.0, 1.0, max(10000, 10 * self.n_grid_points))
         grid_mid = (grid_eval_dense[:-1] + grid_eval_dense[1:]) / 2
         density_mid, delta_mid, max_log, norm_const = BaseEstimator.normalized_hal_density(
             grid_mid,
@@ -187,10 +187,21 @@ class WeightedCVXPYEstimator(BaseEstimator):
         )
         self._norm_shift = max_log
         self._norm_Z = norm_const
-        self._density_midpoints = density_mid
-        self.grid_midpoints = grid_mid
-        self.delta_j = delta_mid
-        self.grid_points = np.linspace(0.0, 1.0, self.n_grid_points)
+        
+        # Compute density on the requested output grid
+        output_grid = np.linspace(0.0, 1.0, self.n_grid_points)
+        output_grid_mid = (output_grid[:-1] + output_grid[1:]) / 2
+        
+        # Recalculate density values for the output grid using the robust normalization
+        df_out = pd.DataFrame({"W1": output_grid_mid})
+        basis_out, _ = create_basis_functions(df_out, grid_points_hal, order=self.basis_order, include_intercept=True)
+        log_out = basis_out @ self.theta_hat
+        shifted_out = np.clip(log_out - self._norm_shift, -700, 700)
+        self._density_midpoints = np.exp(shifted_out) / self._norm_Z
+        
+        self.grid_midpoints = output_grid_mid
+        self.delta_j = output_grid[1:] - output_grid[:-1]
+        self.grid_points = output_grid
 
         self.is_fitted = True
         self.fitted_theta_dict = {name: float(value) for name, value in zip(self.basis_names, self.theta_hat)}

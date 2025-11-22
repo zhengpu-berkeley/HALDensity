@@ -9,6 +9,7 @@ from .weighted_cvxpy_estimator import WeightedCVXPYEstimator
 from .km import KaplanMeier
 from .weights import compute_ipcw_weights
 from .metrics import incomplete_loglik, mi_complete_loglik
+from .sampling import e_step_multiple_imputation
 
 
 ESTIMATORS = {
@@ -89,6 +90,7 @@ class CensoredOptunaHyperparameterTuner:
         norm_constraint = ovr.get("norm_constraint", {"low": 1e-3, "high": 1e3, "log": True})
         m_imputations = ovr.get("m_imputations", {"low": 5, "high": 50})
         max_em_iter = ovr.get("max_em_iter", {"low": 10, "high": 100})
+        m_step_norm_multiplier = ovr.get("m_step_norm_multiplier", {"low": 0.5, "high": 10.0, "log": True})
 
         def choose_categorical(name, values):
             return trial.suggest_categorical(name, values) if isinstance(values, (list, tuple)) else values
@@ -106,9 +108,10 @@ class CensoredOptunaHyperparameterTuner:
         params = {
             "basis_order": choose_categorical("basis_order", basis_order),
             "norm_constraint": choose_float("norm_constraint", norm_constraint),
+            "m_step_norm_multiplier": choose_float("m_step_norm_multiplier", m_step_norm_multiplier),
         }
-        def _default_m_step_norm(norm_val: float, order_val: int) -> float:
-            return 1.0 * norm_val if order_val == 0 else 5.0 * norm_val
+        def _default_m_step_norm(norm_val: float, order_val: int, multiplier: float) -> float:
+            return multiplier * norm_val
         if self.estimator_name == "EMIPCWEstimator":
             params.update({
                 "m_imputations": choose_int("m_imputations", m_imputations),
@@ -120,7 +123,7 @@ class CensoredOptunaHyperparameterTuner:
                 "m_step_norm_constraint": self._optional_param(
                     trial,
                     "m_step_norm_constraint",
-                    _default_m_step_norm(params["norm_constraint"], params["basis_order"]),
+                    _default_m_step_norm(params["norm_constraint"], params["basis_order"], params["m_step_norm_multiplier"]),
                 ),
                 "e_step_n_grid": self._optional_param(trial, "e_step_n_grid", 1000),
                 "rng_seed": self._optional_param(trial, "rng_seed", self.random_state),
@@ -144,7 +147,7 @@ class CensoredOptunaHyperparameterTuner:
 
     def _evaluate(self, params: dict[str, Any]) -> float:
         scores = []
-        for train_idx, val_idx in self.kfold.split(self.data):
+        for fold_idx, (train_idx, val_idx) in enumerate(self.kfold.split(self.data)):
             train_df = self.data.iloc[train_idx].reset_index(drop=True)
             val_df = self.data.iloc[val_idx].reset_index(drop=True)
 
@@ -171,7 +174,8 @@ class CensoredOptunaHyperparameterTuner:
                 def _resolve_m_step_norm(p: dict[str, Any]) -> float:
                     if "m_step_norm_constraint" in p and p["m_step_norm_constraint"] is not None:
                         return p["m_step_norm_constraint"]
-                    return p["norm_constraint"] if p["basis_order"] == 0 else 5.0 * p["norm_constraint"]
+                    multiplier = p.get("m_step_norm_multiplier", 1.0 if p["basis_order"] == 0 else 5.0)
+                    return multiplier * p["norm_constraint"]
                 est_kwargs = {
                     "tol": params["tol"],
                     "norm_constraint": params["norm_constraint"],
@@ -195,8 +199,29 @@ class CensoredOptunaHyperparameterTuner:
             if self.metric == "incomplete":
                 score = incomplete_loglik(est, val_df, time_col="T", delta_col="Delta")
             else:
-                augmented = getattr(est, "uncensored_augmented_", None)
-                score = mi_complete_loglik(est, augmented)
+                # mi_complete: generate imputations on validation fold
+                if self.estimator_name == "WeightedCVXPYEstimator":
+                    # IPCW doesn't use imputations; fall back to incomplete metric
+                    score = incomplete_loglik(est, val_df, time_col="T", delta_col="Delta")
+                else:
+                    # Generate validation imputations using fitted model
+                    theta_hat = est.theta_hat.copy()
+                    basis_grid = est._grid_points_hal.copy()
+                    km = est.km_
+                    S_c_predict = km.predict if km is not None else (lambda x: np.ones_like(x))
+                    
+                    val_augmented = e_step_multiple_imputation(
+                        data=val_df,
+                        theta_hat=theta_hat,
+                        basis_grid_points=basis_grid,
+                        basis_order=params["basis_order"],
+                        S_c_predict=S_c_predict,
+                        m_imputations=params.get("m_imputations", 20),
+                        n_grid=params.get("e_step_n_grid", 1000),
+                        use_sc_adjustment=params.get("use_sc_adjustment", False),
+                        rng=np.random.default_rng(self.random_state + fold_idx * 1000),
+                    )
+                    score = mi_complete_loglik(est, val_augmented)
             scores.append(score)
 
         # Optuna minimizes; we want to maximize log-likelihood
@@ -267,7 +292,8 @@ class CensoredOptunaHyperparameterTuner:
             def _resolve_m_step_norm(p: dict[str, Any]) -> float:
                 if "m_step_norm_constraint" in p and p["m_step_norm_constraint"] is not None:
                     return p["m_step_norm_constraint"]
-                return p["norm_constraint"] if p["basis_order"] == 0 else 5.0 * p["norm_constraint"]
+                multiplier = p.get("m_step_norm_multiplier", 1.0 if p["basis_order"] == 0 else 5.0)
+                return multiplier * p["norm_constraint"]
             est_kwargs = {
                 "tol": params.get("tol", 1e-4),
                 "norm_constraint": params["norm_constraint"],
