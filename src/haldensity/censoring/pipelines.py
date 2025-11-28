@@ -3,7 +3,7 @@ from typing import Dict, Any, Optional
 from .km import KaplanMeier
 from .weights import compute_ipcw_weights
 from .weighted_cvxpy_estimator import WeightedCVXPYEstimator
-from .em_estimator import EMIPCWEstimator
+from .em import EMIPCWEstimator
 
 
 def run_ipcw_hal_mle(
