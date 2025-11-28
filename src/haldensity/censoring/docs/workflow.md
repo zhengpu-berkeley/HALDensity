@@ -1,4 +1,6 @@
-Here’s a clean Mermaid flowchart matching your pipeline (IPCW init → EM with MI → reuse λ in M-step → outer CV over λ):
+# IPCW-EM-HAL-MLE Workflow for Right-Censored Data
+
+Here's a clean Mermaid flowchart matching your pipeline (IPCW init → EM with MI → reuse λ in M-step → outer CV over λ):
 
 ```mermaid
 flowchart TD
@@ -24,3 +26,4 @@ flowchart TD
   M --> N["Output:<br/>theta_EM(lambda*), f_hat, F_hat, S_hat, h_hat,<br/>CV curves, MI diagnostics"]
   N --> O[End]
 ```
+
