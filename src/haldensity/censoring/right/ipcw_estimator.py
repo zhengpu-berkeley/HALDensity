@@ -1,15 +1,66 @@
+"""IPCW-weighted HAL density estimator for right-censored data.
+
+Uses CVXPY for convex optimization with per-sample IPCW weights.
+"""
+
 from __future__ import annotations
 
+from typing import Optional
 import numpy as np
 import pandas as pd
 import cvxpy as cp
-from typing import Optional
 from haldensity.estimation.base_estimator import BaseEstimator
 from haldensity.utils.basis import create_basis_functions
 
 
-class WeightedCVXPYEstimator(BaseEstimator):
-    """CVXPY-based HAL density estimator with per-sample weights (truncated basis)."""
+class RightCensoredIPCWEstimator(BaseEstimator):
+    """CVXPY-based HAL density estimator with per-sample IPCW weights.
+
+    This estimator fits a HAL-MLE density on uncensored observations,
+    weighted by inverse probability of censoring weights (IPCW).
+
+    The optimization problem is:
+        min_theta  -sum_i w_i * phi(x_i)^T theta + n_eff * log(Z(theta))
+        s.t.       ||theta[k:]||_1 <= norm_constraint
+
+    where:
+    - w_i are IPCW weights (Delta_i / S_C(T_i))
+    - n_eff = sum(w_i) is the effective sample size
+    - Z(theta) is the normalizing constant
+
+    Parameters
+    ----------
+    tol : float
+        Tolerance for pruning small theta coefficients.
+    norm_constraint : float
+        L1 norm constraint for theta coefficients.
+    n_grid_points : int
+        Number of grid points for density evaluation.
+    basis_order : int
+        Order of the truncated power basis (0 = step functions).
+    solver : str
+        CVXPY solver to use.
+    log_dir : str | None
+        Directory for logging.
+    log_frequency : int
+        Frequency of logging (-1 = no logging).
+    use_secondary_solver : bool
+        Whether to try fallback solvers on failure.
+    solver_waterfall : list[str]
+        Fallback solver sequence.
+    max_threads : int | None
+        Maximum threads for MOSEK solver.
+    include_intercept_in_constraint : bool
+        Whether to include intercept in norm constraint.
+
+    Examples
+    --------
+    >>> km = KaplanMeier().fit(data)
+    >>> weights = compute_ipcw_weights(data["T"], data["Delta"], km.predict)
+    >>> uncensored = data[data["Delta"] == 1]
+    >>> est = RightCensoredIPCWEstimator(norm_constraint=50.0)
+    >>> est.fit(pd.DataFrame({"W1": uncensored["T"]}), sample_weights=weights[data["Delta"] == 1])
+    """
 
     def __init__(
         self,
@@ -35,7 +86,7 @@ class WeightedCVXPYEstimator(BaseEstimator):
         self.n_grid_points = n_grid_points
         self.solver = solver
         self.use_secondary_solver = use_secondary_solver
-        self.solver_waterfall = solver_waterfall
+        self.solver_waterfall = list(solver_waterfall)
         self.max_threads = max_threads
         self.include_intercept_in_constraint = include_intercept_in_constraint
 
@@ -51,12 +102,32 @@ class WeightedCVXPYEstimator(BaseEstimator):
         sample_weights: Optional[np.ndarray] = None,
         grid_points_override: Optional[np.ndarray] = None,
         warm_start_theta: Optional[np.ndarray] = None,
-    ) -> "WeightedCVXPYEstimator":
+    ) -> "RightCensoredIPCWEstimator":
+        """Fit the IPCW-weighted HAL density estimator.
+
+        Parameters
+        ----------
+        data : pd.DataFrame
+            DataFrame with column 'W1' containing the observations.
+        sample_weights : np.ndarray | None
+            IPCW weights for each observation. If None, looks for
+            'ipcw_weight' column or uses uniform weights.
+        grid_points_override : np.ndarray | None
+            Override the knot locations for the basis.
+        warm_start_theta : np.ndarray | None
+            Initial theta values for warm starting.
+
+        Returns
+        -------
+        self
+        """
         if "W1" not in data.columns:
             raise ValueError("data must contain column 'W1'")
+
         x = np.asarray(data["W1"].values, dtype=float).ravel()
         n_samples = x.shape[0]
 
+        # Get weights
         if sample_weights is None:
             if "ipcw_weight" in data.columns:
                 w = np.asarray(data["ipcw_weight"].values, dtype=float).ravel()
@@ -64,12 +135,15 @@ class WeightedCVXPYEstimator(BaseEstimator):
                 w = np.ones(n_samples, dtype=float)
         else:
             w = np.asarray(sample_weights, dtype=float).ravel()
+
         if w.shape[0] != n_samples:
             raise ValueError("sample_weights length must match number of rows in data")
+
         w_sum = float(np.sum(w))
         if w_sum <= 0:
             raise ValueError("Sum of weights must be positive")
 
+        # Set up grid points for basis
         if grid_points_override is not None and len(grid_points_override) > 0:
             grid_points_hal = np.sort(np.unique(np.asarray(grid_points_override, dtype=float)))
         else:
@@ -78,6 +152,7 @@ class WeightedCVXPYEstimator(BaseEstimator):
             )
         self._grid_points_hal = grid_points_hal
 
+        # Build basis for data points
         df_x = pd.DataFrame({"W1": x})
         basis_array, basis_names = create_basis_functions(
             df_x,
@@ -88,6 +163,7 @@ class WeightedCVXPYEstimator(BaseEstimator):
         self.basis_names = basis_names
         b_ik = basis_array
 
+        # Build basis for evaluation grid
         grid_eval = np.linspace(0.0, 1.0, self.n_grid_points)
         grid_midpoints = (grid_eval[:-1] + grid_eval[1:]) / 2
         df_mid = pd.DataFrame({"W1": grid_midpoints})
@@ -99,8 +175,10 @@ class WeightedCVXPYEstimator(BaseEstimator):
         )
         b_jk = basis_grid_array
 
+        # Set up optimization problem
         K = b_ik.shape[1]
         theta = cp.Variable(K)
+
         first_term = -cp.sum(cp.multiply(w, b_ik @ theta))
         delta_j = grid_eval[1:] - grid_eval[:-1]
         log_delta_j = np.log(delta_j)
@@ -109,19 +187,19 @@ class WeightedCVXPYEstimator(BaseEstimator):
         second_term = w_sum * log_Z
 
         loss = first_term + second_term
+
         if self.include_intercept_in_constraint:
             constraints = [cp.norm1(theta) <= self.norm_constraint]
         else:
-            # We want to exclude only the intercept (index 0) from the constraint
-            # so that the model can shrink to a uniform distribution (flat) when 
-            # the constraint is small.
             start_idx = 1
             if start_idx >= K:
                 constraints = []
             else:
                 constraints = [cp.norm1(theta[start_idx:]) <= self.norm_constraint]
+
         problem = cp.Problem(cp.Minimize(loss), constraints)
 
+        # Warm start
         warm_args = False
         if warm_start_theta is not None and len(warm_start_theta) == K:
             theta.value = warm_start_theta
@@ -135,6 +213,7 @@ class WeightedCVXPYEstimator(BaseEstimator):
                 solve_kwargs["warm_start"] = True
             problem.solve(**solve_kwargs)
 
+        # Solve with fallback
         try:
             _solve_with_kwargs(self.solver, warm_args)
         except Exception as exc:
@@ -158,33 +237,37 @@ class WeightedCVXPYEstimator(BaseEstimator):
                     f"CVXPY optimization failed with all solvers in waterfall; last error: {last_error}"
                 )
 
-        self.lambda_val_lag = problem.constraints[0].dual_value
+        if constraints:
+            self.lambda_val_lag = problem.constraints[0].dual_value
         if theta.value is None:
             raise RuntimeError("CVXPY optimization failed - theta.value is None")
-        self.optimized_theta_raw = theta.value.copy()
 
+        self.optimized_theta_raw = theta.value.copy()
         self.theta_hat = theta.value.copy()
+
+        # Prune small coefficients
         poly_cols = self.basis_order if self.basis_order > 0 else 0
         knot_start = 1 + poly_cols
         if self.theta_hat.size < knot_start:
             knot_start = self.theta_hat.size
+
         self.theta_hat[knot_start:] = np.where(
             np.abs(self.theta_hat[knot_start:]) > self.tol,
             self.theta_hat[knot_start:],
             0,
         )
+
         non_zero_knot_indices = np.where(self.theta_hat[knot_start:] != 0)[0]
         if non_zero_knot_indices.size > 0:
             self.grid_points_hal_selected = grid_points_hal[non_zero_knot_indices].copy()
         else:
             self.grid_points_hal_selected = np.array([])
 
-        # Compute density on the output grid (midpoint rule for integration)
+        # Compute normalized density
         output_grid = np.linspace(0.0, 1.0, self.n_grid_points)
         output_grid_mid = (output_grid[:-1] + output_grid[1:]) / 2
         delta_out = output_grid[1:] - output_grid[:-1]
-        
-        # Normalize density on the output grid to ensure it integrates to 1
+
         density_out, _, max_log, norm_const = BaseEstimator.normalized_hal_density(
             output_grid_mid,
             self.theta_hat,
@@ -194,18 +277,22 @@ class WeightedCVXPYEstimator(BaseEstimator):
         self._norm_shift = max_log
         self._norm_Z = norm_const
         self._density_midpoints = density_out
-        
+
         self.grid_midpoints = output_grid_mid
         self.delta_j = delta_out
         self.grid_points = output_grid
 
         self.is_fitted = True
-        self.fitted_theta_dict = {name: float(value) for name, value in zip(self.basis_names, self.theta_hat)}
+        self.fitted_theta_dict = {
+            name: float(value) for name, value in zip(self.basis_names, self.theta_hat)
+        }
         return self
 
     def _normalized_density(self, points: np.ndarray) -> np.ndarray:
+        """Evaluate normalized density at points."""
         if self._norm_shift is None or self._norm_Z is None:
             raise RuntimeError("Estimator must be fitted before requesting density")
+
         df_pts = pd.DataFrame({"W1": points})
         basis_eval, _ = create_basis_functions(
             df_pts,
@@ -218,17 +305,37 @@ class WeightedCVXPYEstimator(BaseEstimator):
         return np.exp(shifted) / self._norm_Z
 
     def get_density(self) -> tuple[np.ndarray, np.ndarray]:
+        """Get the estimated density on the evaluation grid.
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray]
+            (grid_midpoints, density_values)
+        """
         if not self.is_fitted or self._density_midpoints is None:
             raise ValueError("Estimator must be fitted before getting density.")
         return self.grid_midpoints, self._density_midpoints.copy()
 
     def get_density_at_points(self, points: np.ndarray) -> np.ndarray:
+        """Evaluate density at specific points.
+
+        Parameters
+        ----------
+        points : np.ndarray
+            Points at which to evaluate the density.
+
+        Returns
+        -------
+        np.ndarray
+            Density values.
+        """
         if not self.is_fitted:
             raise ValueError("Estimator must be fitted before getting density.")
         pts = np.asarray(points, dtype=float).ravel()
         return self._normalized_density(pts)
 
     def get_results(self) -> dict:
+        """Return standardized results plus IPCW-specific fields."""
         if not self.is_fitted:
             raise ValueError("Estimator must be fitted before getting results.")
         base = self._get_common_results()
@@ -237,3 +344,4 @@ class WeightedCVXPYEstimator(BaseEstimator):
             "optimized_theta_raw": self.optimized_theta_raw,
         })
         return base
+
