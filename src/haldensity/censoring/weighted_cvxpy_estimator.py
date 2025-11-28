@@ -112,8 +112,10 @@ class WeightedCVXPYEstimator(BaseEstimator):
         if self.include_intercept_in_constraint:
             constraints = [cp.norm1(theta) <= self.norm_constraint]
         else:
-            poly_cols = self.basis_order if self.basis_order > 0 else 0
-            start_idx = 1 + poly_cols
+            # We want to exclude only the intercept (index 0) from the constraint
+            # so that the model can shrink to a uniform distribution (flat) when 
+            # the constraint is small.
+            start_idx = 1
             if start_idx >= K:
                 constraints = []
             else:
