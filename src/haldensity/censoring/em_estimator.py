@@ -8,12 +8,16 @@ from haldensity.estimation.base_estimator import BaseEstimator
 from .km import KaplanMeier
 from .weights import compute_ipcw_weights
 from .weighted_cvxpy_estimator import WeightedCVXPYEstimator
-from .sampling import e_step_multiple_imputation
-from .metrics import incomplete_loglik
+from .em_stage import EMStage, EMStageResult
 
 
 class EMIPCWEstimator(BaseEstimator):
-    """EM with multiple imputation for right-censored data on [0, 1]."""
+    """EM with multiple imputation for right-censored data on [0, 1].
+    
+    This estimator combines:
+    1. IPCW-HAL-MLE initialization on uncensored observations
+    2. EM refinement via EMStage with multiple imputation for censored observations
+    """
 
     def __init__(
         self,
@@ -59,23 +63,28 @@ class EMIPCWEstimator(BaseEstimator):
             m_step_norm_constraint if m_step_norm_constraint is not None else norm_constraint
         )
         self.e_step_n_grid = e_step_n_grid
-        self.rng = np.random.default_rng(rng_seed)
+        self.rng_seed = rng_seed
         self.km_: Optional[KaplanMeier] = None
         self.uncensored_augmented_: Optional[pd.DataFrame] = None
         self.theta_path_: list[np.ndarray] = []
         self.em_iterations_: int = 0
         self.em_converged_: bool = False
+        self._current_estimator: Optional[BaseEstimator] = None
+        self._em_stage_result: Optional[EMStageResult] = None
 
     def _init_ipcw(self, data: pd.DataFrame) -> WeightedCVXPYEstimator:
+        """Fit initial IPCW-weighted HAL estimator on uncensored observations."""
         km = KaplanMeier().fit(data, time_col="T", delta_col="Delta")
         self.km_ = km
+        T_vals = np.asarray(data["T"].values, dtype=float)
+        Delta_vals = np.asarray(data["Delta"].values, dtype=int)
         weights = compute_ipcw_weights(
-            T=data["T"].values,
-            Delta=data["Delta"].values,
-            S_c_predict=km.predict,
+            T=T_vals,
+            Delta=Delta_vals,
+            S_c_predict=lambda x: np.atleast_1d(km.predict(x)),
         )
-        uncensored_mask = data["Delta"].values == 1
-        df_unc = pd.DataFrame({"W1": data.loc[uncensored_mask, "T"].values})
+        uncensored_mask = Delta_vals == 1
+        df_unc = pd.DataFrame({"W1": T_vals[uncensored_mask]})
         w_unc = weights[uncensored_mask]
         return WeightedCVXPYEstimator(
             tol=self.tol,
@@ -90,78 +99,84 @@ class EMIPCWEstimator(BaseEstimator):
         ).fit(df_unc, sample_weights=w_unc)
 
     def fit(self, data: pd.DataFrame) -> "EMIPCWEstimator":
+        """Fit the EM-IPCW-HAL estimator.
+        
+        Parameters
+        ----------
+        data : pd.DataFrame
+            DataFrame with columns 'T' (observed time) and 'Delta' (event indicator).
+            
+        Returns
+        -------
+        self
+        """
         if "T" not in data.columns or "Delta" not in data.columns:
             raise ValueError("data must contain columns 'T' and 'Delta'")
+
+        # Step 1: Fit initial IPCW estimator
         if self.verbose:
             print("Initializing IPCW-HAL-MLE...")
         init_est = self._init_ipcw(data)
         self._debug_estimator_state("init-ipcw", init_est)
-        self._current_estimator = init_est
-        self.theta_full_ = init_est.theta_hat.copy()
-        self.basis_full_ = init_est._grid_points_hal.copy()
-        self.theta_subset_, self.active_knots_ = self._prune_theta(
-            self.theta_full_,
-            self.basis_full_,
+
+        # Step 2: Run EM stage
+        em_stage = EMStage(
+            m_imputations=self.m_imputations,
+            max_em_iter=self.max_em_iter,
+            em_tol=self.em_tol,
+            norm_constraint=self.m_step_norm_constraint,
+            n_grid_points=self.n_grid_points,
+            use_sc_adjustment=self.use_sc_adjustment,
+            e_step_n_grid=self.e_step_n_grid,
+            tol=self.tol,
+            m_step_solver=self.m_step_solver,
+            m_step_solver_sequence=self.m_step_solver_sequence,
+            include_intercept_in_constraint=True,
+            verbose=self.verbose,
+            rng_seed=self.rng_seed,
+            log_dir=self.log_dir,
+            log_frequency=self.log_frequency,
         )
-        theta_basis_grid_points = self.basis_full_.copy()
-        self.theta_path_.append(self.theta_full_.copy())
 
-        prev_ll = incomplete_loglik(init_est, data, time_col="T", delta_col="Delta")
-        if self.verbose:
-            print(f"Initial incomplete-data log-likelihood: {prev_ll:.4f}")
+        def _s_c_predict_wrapper(x: np.ndarray) -> np.ndarray:
+            if self.km_ is not None:
+                return np.atleast_1d(self.km_.predict(x))
+            return np.ones_like(x)
 
-        self.em_converged_ = False
-        for em_iter in range(self.max_em_iter):
-            self.em_iterations_ = em_iter + 1
-            import time as _time
+        em_result = em_stage.run(
+            initial_estimator=init_est,
+            data=data,
+            S_c_predict=_s_c_predict_wrapper,
+        )
+        self._em_stage_result = em_result
 
-            _t0 = _time.time()
-            pooled = e_step_multiple_imputation(
-                data=data,
-                theta_hat=self.theta_full_,
-                basis_grid_points=theta_basis_grid_points,
-                basis_order=self.basis_order,
-                S_c_predict=self.km_.predict if self.km_ is not None else (lambda x: np.ones_like(x)),
-                m_imputations=self.m_imputations,
-                n_grid=self.e_step_n_grid,
-                use_sc_adjustment=self.use_sc_adjustment,
-                rng=self.rng,
-            )
-            e_time = _time.time() - _t0
-            self.uncensored_augmented_ = pooled
-            self._debug_pooled_data(em_iter + 1, pooled)
+        # Store EM results
+        if init_est.theta_hat is not None:
+            self.theta_path_ = [init_est.theta_hat.copy()] + em_result.theta_path[1:]
+        else:
+            self.theta_path_ = em_result.theta_path
+        self.em_iterations_ = em_result.em_iterations
+        self.em_converged_ = em_result.em_converged
+        self.uncensored_augmented_ = em_result.final_augmented_data
 
-            _t1 = _time.time()
-            mstep_est = self._fit_weighted_m_step(pooled)
-            m_time = _time.time() - _t1
-            self._current_estimator = mstep_est
-            self.theta_full_ = mstep_est.theta_hat.copy()
-            self.basis_full_ = mstep_est._grid_points_hal.copy()
-            self.theta_subset_, self.active_knots_ = self._prune_theta(
-                self.theta_full_,
-                self.basis_full_,
-            )
-            theta_basis_grid_points = self.basis_full_.copy()
-            self.theta_path_.append(self.theta_full_.copy())
-            self._debug_estimator_state(f"m-step-{em_iter + 1}", mstep_est)
-
-            curr_ll = incomplete_loglik(mstep_est, data, time_col="T", delta_col="Delta")
-            ll_diff = np.abs(curr_ll - prev_ll)
-            if self.verbose:
-                print(
-                    f"Iter {em_iter + 1}: LL={curr_ll:.4f}, Δ={ll_diff:.6f}, "
-                    f"E-step={e_time:.3f}s, M-step={m_time:.3f}s"
-                )
-            if ll_diff < self.em_tol:
-                if self.verbose:
-                    print(
-                        f"\nConverged at iteration {em_iter + 1}: LL diff {ll_diff:.6f} < tol {self.em_tol}"
-                    )
-                self.em_converged_ = True
-                break
-            prev_ll = curr_ll
-
-        final_est = self._current_estimator
+        # Copy final estimator state to self
+        final_est = em_result.final_estimator
+        self._current_estimator = final_est
+        
+        # Validate final estimator has required attributes
+        if final_est.theta_hat is None:
+            raise RuntimeError("EM stage failed: final estimator has no theta_hat")
+        if final_est._grid_points_hal is None:
+            raise RuntimeError("EM stage failed: final estimator has no _grid_points_hal")
+        if final_est.grid_midpoints is None:
+            raise RuntimeError("EM stage failed: final estimator has no grid_midpoints")
+        if final_est.delta_j is None:
+            raise RuntimeError("EM stage failed: final estimator has no delta_j")
+        if final_est.grid_points is None:
+            raise RuntimeError("EM stage failed: final estimator has no grid_points")
+        if final_est.grid_points_hal_selected is None:
+            raise RuntimeError("EM stage failed: final estimator has no grid_points_hal_selected")
+            
         self.theta_hat = final_est.theta_hat.copy()
         self._grid_points_hal = final_est._grid_points_hal.copy()
         self.grid_midpoints = final_est.grid_midpoints.copy()
@@ -171,31 +186,16 @@ class EMIPCWEstimator(BaseEstimator):
         self.basis_names = final_est.basis_names
         self.fitted_theta_dict = final_est.fitted_theta_dict
         self.is_fitted = True
-        return self
 
-    def _fit_weighted_m_step(self, pooled_df: pd.DataFrame) -> WeightedCVXPYEstimator:
-        weights = pooled_df["weight"].values.astype(float)
-        df_values = pd.DataFrame({"W1": pooled_df["W1"].values})
-        warm_estimator = getattr(self, "_current_estimator", None)
-        grid_override = getattr(warm_estimator, "_grid_points_hal", None)
-        warm_theta = getattr(warm_estimator, "theta_hat", None)
-        return WeightedCVXPYEstimator(
-            tol=self.tol,
-            norm_constraint=self.m_step_norm_constraint,
-            n_grid_points=self.n_grid_points,
-            basis_order=self.basis_order,
-            log_dir=self.log_dir,
-            log_frequency=self.log_frequency,
-            solver=self.m_step_solver,
-            use_secondary_solver=True,
-            solver_waterfall=self.m_step_solver_sequence,
-            include_intercept_in_constraint=True,
-        ).fit(
-            df_values,
-            sample_weights=weights,
-            grid_points_override=grid_override,
-            warm_start_theta=warm_theta,
+        # Compute pruned theta for compatibility
+        self.theta_full_ = self.theta_hat.copy()
+        self.basis_full_ = self._grid_points_hal.copy()
+        self.theta_subset_, self.active_knots_ = self._prune_theta(
+            self.theta_full_,
+            self.basis_full_,
         )
+
+        return self
 
     def get_results(self) -> dict:
         if not self.is_fitted:
@@ -274,19 +274,3 @@ class EMIPCWEstimator(BaseEstimator):
             )
         except Exception as exc:
             print(f"[DEBUG][{label}] unable to compute diagnostics: {exc}")
-
-    def _debug_pooled_data(self, em_iter: int, pooled_df: pd.DataFrame) -> None:
-        if not self.verbose or pooled_df is None or pooled_df.empty:
-            return
-        weights = pooled_df["weight"].values.astype(float)
-        values = pooled_df["W1"].values.astype(float)
-        unc_mask = np.isclose(weights, 1.0)
-        unc_min = float(values[unc_mask].min()) if np.any(unc_mask) else float("nan")
-        cen_mask = ~unc_mask
-        cen_min = float(values[cen_mask].min()) if np.any(cen_mask) else float("nan")
-        print(
-            f"[DEBUG][E-step-{em_iter}] pooled samples={len(values)}, "
-            f"weight_sum={weights.sum():.4f}, weight_range=({weights.min():.4e}, {weights.max():.4e}), "
-            f"value_range=({values.min():.4f}, {values.max():.4f}), "
-            f"unc_min={unc_min:.4f}, cens_min={cen_min:.4f}"
-        )

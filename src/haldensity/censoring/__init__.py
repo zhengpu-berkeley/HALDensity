@@ -6,8 +6,10 @@ from .metrics import (
     kl_divergence,
 )
 from .weighted_cvxpy_estimator import WeightedCVXPYEstimator
+from .em_stage import EMStage, EMStageResult
 from .em_estimator import EMIPCWEstimator
 from .cv_tuner import CensoredOptunaHyperparameterTuner
+from .cv_tuner_updated import TwoStageCensoredTuner, EMStageTuner
 from . import pipelines
 
 __all__ = [
@@ -17,8 +19,12 @@ __all__ = [
     "mi_complete_loglik",
     "kl_divergence",
     "WeightedCVXPYEstimator",
+    "EMStage",
+    "EMStageResult",
     "EMIPCWEstimator",
     "CensoredOptunaHyperparameterTuner",
+    "TwoStageCensoredTuner",
+    "EMStageTuner",
     "pipelines",
 ]
 
