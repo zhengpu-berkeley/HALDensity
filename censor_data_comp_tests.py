@@ -33,12 +33,15 @@ class Config:
     n_samples: int = 1000
     n_grid_points: int = 200
     basis_order: int = 0
-    best_lambda: float = 8.0
-    m_step_norm: float = None
+    norm_constraint: float = 8.0
+    # M-step norm constraint: None means use same as norm_constraint (default behavior)
+    # Note: Using a very large value (e.g., 1000) leads to degenerate solutions
+    # because the M-step will overfit to the augmented data
+    m_step_norm_constraint: float = None
     m_imputations: int = 50
-    max_em_iter: int = 15
+    max_em_iter: int = 5
     em_tol: float = 0.01
-    init_solver: str = "SCS"
+    init_solver: str = "ECOS"
     m_step_solver: str = "ECOS"
     e_step_n_grid: int = 1000
     max_runtime_seconds: float = 120.0
@@ -55,8 +58,8 @@ def parse_args() -> Config:
     parser.add_argument("--n-samples", type=int, default=Config.n_samples)
     parser.add_argument("--n-grid-points", type=int, default=Config.n_grid_points)
     parser.add_argument("--basis-order", type=int, default=Config.basis_order)
-    parser.add_argument("--best-lambda", type=float, default=Config.best_lambda)
-    parser.add_argument("--m-step-norm", type=float, default=None)
+    parser.add_argument("--norm-constraint", type=float, default=Config.norm_constraint)
+    parser.add_argument("--m-step-norm-constraint", type=float, default=None)
     parser.add_argument("--m-imputations", type=int, default=Config.m_imputations)
     parser.add_argument("--max-em-iter", type=int, default=Config.max_em_iter)
     parser.add_argument("--em-tol", type=float, default=Config.em_tol)
@@ -67,19 +70,19 @@ def parse_args() -> Config:
     parser.add_argument("--use-sc-adjustment", action="store_true")
     parser.add_argument("--verbose-em", action="store_true", default=Config.verbose_em)
     args = parser.parse_args()
-    if args.m_step_norm is not None:
-        m_step_norm = args.m_step_norm
+    if args.m_step_norm_constraint is not None:
+        m_step_norm_constraint = args.m_step_norm_constraint
     elif args.basis_order == 0:
-        m_step_norm = 1.0 * args.best_lambda
+        m_step_norm_constraint = 1.0 * args.norm_constraint
     else:
-        m_step_norm = 5.0 * args.best_lambda
+        m_step_norm_constraint = 5.0 * args.norm_constraint
     return Config(
         seed=args.seed,
         n_samples=args.n_samples,
         n_grid_points=args.n_grid_points,
         basis_order=args.basis_order,
-        best_lambda=args.best_lambda,
-        m_step_norm=m_step_norm,
+        norm_constraint=args.norm_constraint,
+        m_step_norm_constraint=m_step_norm_constraint,
         m_imputations=args.m_imputations,
         max_em_iter=args.max_em_iter,
         em_tol=args.em_tol,
@@ -142,7 +145,7 @@ def main(cfg: Config | None = None):
 
     print(f"Fitting IPCW-HAL-MLE with {cfg.init_solver}...")
     ipcw_est = WeightedCVXPYEstimator(
-        norm_constraint=cfg.best_lambda,
+        norm_constraint=cfg.norm_constraint,
         basis_order=cfg.basis_order,
         n_grid_points=cfg.n_grid_points,
         solver=cfg.init_solver,
@@ -153,7 +156,7 @@ def main(cfg: Config | None = None):
 
     print("Fitting EM-IPCW-HAL-MLE...")
     em_est = EMIPCWEstimator(
-        norm_constraint=cfg.m_step_norm,
+        norm_constraint=cfg.m_step_norm_constraint,
         basis_order=cfg.basis_order,
         n_grid_points=cfg.n_grid_points,
         m_imputations=cfg.m_imputations,
@@ -163,8 +166,8 @@ def main(cfg: Config | None = None):
         verbose=cfg.verbose_em,
         init_solver=cfg.init_solver,
         m_step_solver=cfg.m_step_solver,
-        init_norm_constraint=cfg.best_lambda,
-        m_step_norm_constraint=cfg.m_step_norm,
+        init_norm_constraint=cfg.norm_constraint,
+        m_step_norm_constraint=cfg.m_step_norm_constraint,
         e_step_n_grid=cfg.e_step_n_grid,
         rng_seed=cfg.seed,
     ).fit(data)
@@ -183,6 +186,11 @@ def main(cfg: Config | None = None):
     print(f"KL Divergence (True vs. EM):   {kl_em}")
     assert kl_ipcw < 0.1, "KL(IPCW) too large"
     assert kl_em < 0.1, "KL(EM) too large"
+    # Note: We do NOT assert ipcw_ll <= em_ll because:
+    # 1. EM with multiple imputation is a Monte Carlo approximation
+    # 2. M-step optimizes complete-data LL (Σ log f(T*)), not incomplete-data LL (Σ δ·log f + (1-δ)·log S)
+    # 3. With regularization, these objectives can diverge
+    # The EM guarantee of monotonic LL increase only holds for exact, unconstrained EM.
 
     _check_density(ipcw_est, "IPCW")
     _check_density(em_est, "EM")
