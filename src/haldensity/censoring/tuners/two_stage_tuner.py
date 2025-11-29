@@ -13,14 +13,14 @@ import optuna
 from sklearn.model_selection import KFold
 from tqdm import tqdm
 
-from haldensity.censoring.core.models import EMStageResult, EM_DEFAULTS, TUNER_DEFAULTS
+from haldensity.censoring.core.models import RightCensoredEMStageResult, EM_DEFAULTS, TUNER_DEFAULTS
 from haldensity.censoring.right.km import KaplanMeier
-from haldensity.censoring.right.em_stage import EMStage
+from haldensity.censoring.right.em_stage import RightCensoredEMStage
 from haldensity.censoring.right.metrics import incomplete_loglik
 from ._base import IPCWFittingMixin
 
 
-class TwoStageCensoredTuner(IPCWFittingMixin):
+class RightCensoredTwoStageTuner(IPCWFittingMixin):
     """Two-stage hyperparameter tuner for censored density estimation.
 
     Stage 1: Fast IPCW-only tuning
@@ -31,7 +31,7 @@ class TwoStageCensoredTuner(IPCWFittingMixin):
     Stage 2: EM refinement tuning
         - Tunes: m_step_norm_multiplier only (log scale 0.5 to 1.0)
         - Fixed: All Stage 1 params + EM defaults
-        - Uses: EMStage with IPCW initial
+        - Uses: RightCensoredEMStage with IPCW initial
         - Metric: Incomplete-data log-likelihood
 
     Parameters
@@ -55,7 +55,7 @@ class TwoStageCensoredTuner(IPCWFittingMixin):
 
     Examples
     --------
-    >>> tuner = TwoStageCensoredTuner(data=data, cv_folds=5)
+    >>> tuner = RightCensoredTwoStageTuner(data=data, cv_folds=5)
     >>> best_params = tuner.optimize(n_trials_stage1=30, n_trials_stage2=20)
     >>> result = tuner.fit_best_model()
     """
@@ -265,7 +265,7 @@ class TwoStageCensoredTuner(IPCWFittingMixin):
                     basis_order=basis_order,
                 )
 
-                em_stage = EMStage(
+                em_stage = RightCensoredEMStage(
                     m_imputations=self.em_defaults["m_imputations"],
                     max_em_iter=self.em_defaults["max_em_iter"],
                     em_tol=self.em_defaults["em_tol"],
@@ -402,12 +402,12 @@ class TwoStageCensoredTuner(IPCWFittingMixin):
 
         return self.best_params
 
-    def fit_best_model(self) -> EMStageResult:
+    def fit_best_model(self) -> RightCensoredEMStageResult:
         """Fit final model on full data with best parameters from both stages.
 
         Returns
         -------
-        EMStageResult
+        RightCensoredEMStageResult
             Result containing the final refined estimator.
         """
         if self.best_params is None:
@@ -424,7 +424,7 @@ class TwoStageCensoredTuner(IPCWFittingMixin):
             basis_order=basis_order,
         )
 
-        em_stage = EMStage(
+        em_stage = RightCensoredEMStage(
             m_imputations=self.em_defaults["m_imputations"],
             max_em_iter=self.em_defaults["max_em_iter"],
             em_tol=self.em_defaults["em_tol"],

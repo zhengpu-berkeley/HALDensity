@@ -1,6 +1,6 @@
 """Standalone EM stage tuner for pre-fitted initial estimators.
 
-Optimizes m_step_norm_multiplier for EMStage refinement.
+Optimizes m_step_norm_multiplier for RightCensoredEMStage refinement.
 """
 
 from __future__ import annotations
@@ -12,18 +12,18 @@ import optuna
 from sklearn.model_selection import KFold
 from tqdm import tqdm
 
-from haldensity.censoring.core.models import EMStageResult, EM_DEFAULTS, TUNER_DEFAULTS
+from haldensity.censoring.core.models import RightCensoredEMStageResult, EM_DEFAULTS, TUNER_DEFAULTS
 from haldensity.censoring.right.km import KaplanMeier
-from haldensity.censoring.right.em_stage import EMStage
+from haldensity.censoring.right.em_stage import RightCensoredEMStage
 from haldensity.censoring.right.metrics import incomplete_loglik
 from ._base import IPCWFittingMixin
 
 
-class EMStageTuner(IPCWFittingMixin):
+class RightCensoredEMStageTuner(IPCWFittingMixin):
     """Standalone tuner for EM refinement parameters.
 
     Given a pre-fitted initial estimator, this tuner optimizes the
-    `m_step_norm_multiplier` parameter for EMStage refinement.
+    `m_step_norm_multiplier` parameter for RightCensoredEMStage refinement.
 
     This is useful when you already have a fitted IPCW estimator and want
     to find the optimal EM refinement parameters without re-tuning the
@@ -59,7 +59,7 @@ class EMStageTuner(IPCWFittingMixin):
     >>> initial_est = RightCensoredIPCWEstimator(...).fit(...)
     >>> 
     >>> # Tune EM refinement
-    >>> tuner = EMStageTuner(data, initial_est, km.predict)
+    >>> tuner = RightCensoredEMStageTuner(data, initial_est, km.predict)
     >>> tuner.optimize(n_trials=20)
     >>> result = tuner.fit_best_model()
     """
@@ -155,7 +155,7 @@ class EMStageTuner(IPCWFittingMixin):
                 def s_c_predict(t: np.ndarray) -> np.ndarray:
                     return np.atleast_1d(km.predict(t))
 
-                em_stage = EMStage(
+                em_stage = RightCensoredEMStage(
                     m_imputations=self.em_defaults["m_imputations"],
                     max_em_iter=self.em_defaults["max_em_iter"],
                     em_tol=self.em_defaults["em_tol"],
@@ -208,7 +208,7 @@ class EMStageTuner(IPCWFittingMixin):
         self.study = optuna.create_study(direction="minimize")
 
         if not self.silent:
-            progress = tqdm(total=n_trials, desc="EMStage Tuning", unit="trial")
+            progress = tqdm(total=n_trials, desc="RightCensoredEMStage Tuning", unit="trial")
             best_metric = {"value": float("-inf")}
 
             def update_progress(
@@ -247,12 +247,12 @@ class EMStageTuner(IPCWFittingMixin):
 
         return self.best_params
 
-    def fit_best_model(self) -> EMStageResult:
+    def fit_best_model(self) -> RightCensoredEMStageResult:
         """Fit final model on full data with best parameters.
 
         Returns
         -------
-        EMStageResult
+        RightCensoredEMStageResult
             Result containing the final refined estimator.
         """
         if self.best_params is None:
@@ -261,7 +261,7 @@ class EMStageTuner(IPCWFittingMixin):
         m_step_norm_multiplier = self.best_params["m_step_norm_multiplier"]
         m_step_norm_constraint = self.base_norm_constraint * m_step_norm_multiplier
 
-        em_stage = EMStage(
+        em_stage = RightCensoredEMStage(
             m_imputations=self.em_defaults["m_imputations"],
             max_em_iter=self.em_defaults["max_em_iter"],
             em_tol=self.em_defaults["em_tol"],

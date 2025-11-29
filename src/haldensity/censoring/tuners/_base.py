@@ -17,8 +17,6 @@ from haldensity.censoring.right.ipcw_estimator import RightCensoredIPCWEstimator
 
 # Mapping of estimator names to classes
 ESTIMATORS = {
-    "EMIPCWEstimator": "RightCensoredEMEstimator",
-    "WeightedCVXPYEstimator": "RightCensoredIPCWEstimator",
     "RightCensoredEMEstimator": "RightCensoredEMEstimator",
     "RightCensoredIPCWEstimator": "RightCensoredIPCWEstimator",
 }
@@ -133,7 +131,6 @@ def get_estimator_class(estimator_name: str) -> type:
 
     class_map = {
         "EMIPCWEstimator": RightCensoredEMEstimator,
-        "WeightedCVXPYEstimator": RightCensoredIPCWEstimator,
         "RightCensoredEMEstimator": RightCensoredEMEstimator,
         "RightCensoredIPCWEstimator": RightCensoredIPCWEstimator,
     }

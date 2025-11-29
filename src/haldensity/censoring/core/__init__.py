@@ -4,12 +4,12 @@ Contains protocols, models, and base classes shared across censoring types.
 """
 
 from .protocols import CensoringSurvivalEstimator, DensityEstimatorProtocol
-from .models import EMStageResult, EMDefaults, TunerDefaults
+from .models import RightCensoredEMStageResult, EMDefaults, TunerDefaults
 
 __all__ = [
     "CensoringSurvivalEstimator",
     "DensityEstimatorProtocol",
-    "EMStageResult",
+    "RightCensoredEMStageResult",
     "EMDefaults",
     "TunerDefaults",
 ]

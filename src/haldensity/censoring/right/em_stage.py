@@ -1,6 +1,6 @@
 """EM stage for right-censored density estimation.
 
-Provides EMStage class for EM refinement with multiple imputation,
+Provides RightCensoredEMStage class for EM refinement with multiple imputation,
 and sampling functions for the E-step.
 """
 
@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 
 from haldensity.estimation.base_estimator import BaseEstimator
-from haldensity.censoring.core.models import EMStageResult, EM_DEFAULTS
+from haldensity.censoring.core.models import RightCensoredEMStageResult, EM_DEFAULTS
 from .ipcw_estimator import RightCensoredIPCWEstimator
 
 
@@ -226,11 +226,11 @@ def e_step_multiple_imputation(
 
 
 # =============================================================================
-# EMStage Class
+# RightCensoredEMStage Class
 # =============================================================================
 
 
-class EMStage:
+class RightCensoredEMStage:
     """Standalone EM stage for right-censored density estimation.
 
     Implements the Expectation-Maximization algorithm with multiple
@@ -277,7 +277,7 @@ class EMStage:
     >>> initial_est = RightCensoredIPCWEstimator(...).fit(...)
     >>> 
     >>> # Run EM refinement
-    >>> em_stage = EMStage(m_imputations=20, max_em_iter=10)
+    >>> em_stage = RightCensoredEMStage(m_imputations=20, max_em_iter=10)
     >>> result = em_stage.run(initial_est, data, km.predict)
     >>> final_density = result.final_estimator.get_density()
     """
@@ -329,7 +329,7 @@ class EMStage:
         initial_estimator: Any,
         data: pd.DataFrame,
         S_c_predict: Callable[[np.ndarray], np.ndarray],
-    ) -> EMStageResult:
+    ) -> RightCensoredEMStageResult:
         """Run EM iterations starting from an initial estimator.
 
         Parameters
@@ -344,7 +344,7 @@ class EMStage:
 
         Returns
         -------
-        EMStageResult
+        RightCensoredEMStageResult
             Container with the refined estimator, theta path, and convergence info.
         """
         if "T" not in data.columns or "Delta" not in data.columns:
@@ -365,7 +365,7 @@ class EMStage:
         # Compute initial log-likelihood
         prev_ll = incomplete_loglik(current_estimator, data, time_col="T", delta_col="Delta")
         if self.verbose:
-            logger.info(f"EMStage: Initial incomplete-data log-likelihood: {prev_ll:.4f}")
+            logger.info(f"RightCensoredEMStage: Initial incomplete-data log-likelihood: {prev_ll:.4f}")
 
         em_converged = False
         em_iterations = 0
@@ -414,14 +414,14 @@ class EMStage:
 
             if self.verbose:
                 logger.info(
-                    f"EMStage Iter {em_iter + 1}: LL={curr_ll:.4f}, Δ={ll_diff:.6f}, "
+                    f"RightCensoredEMStage Iter {em_iter + 1}: LL={curr_ll:.4f}, Δ={ll_diff:.6f}, "
                     f"E-step={e_time:.3f}s, M-step={m_time:.3f}s"
                 )
 
             if ll_diff < self.em_tol:
                 if self.verbose:
                     logger.info(
-                        f"EMStage: Converged at iteration {em_iter + 1}: "
+                        f"RightCensoredEMStage: Converged at iteration {em_iter + 1}: "
                         f"LL diff {ll_diff:.6f} < tol {self.em_tol}"
                     )
                 em_converged = True
@@ -429,7 +429,7 @@ class EMStage:
 
             prev_ll = curr_ll
 
-        return EMStageResult(
+        return RightCensoredEMStageResult(
             final_estimator=current_estimator,
             theta_path=theta_path,
             em_iterations=em_iterations,

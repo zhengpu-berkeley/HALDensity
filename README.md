@@ -11,7 +11,7 @@ Features
 - Cross-validation and hyperparameter tuning via Optuna
 - Delta-method style density bands; bootstrap example included
 - Targeted learning (TMLE) for survival, mean, and median
-- Torch-free right-censored density estimation via IPCW initialization, EM + MI, and censoring-aware Optuna tuning
+- Right-censored density estimation via IPCW initialization, EM + MI, and censoring-aware Optuna tuning
 
 Install
 This repo uses Python 3.11+. With uv:
@@ -159,50 +159,6 @@ Examples
 - `examples/example_target_learning.ipynb`: targeting examples
 - `examples/example_case_study.ipynb`: real-data galaxy velocity case study
 - `examples/example_censored_pipeline.py`: minimal right-censored HAL workflow (pipelines + Optuna)
-
-### Censored Data (Right-Censoring on [0,1])
-
-The `haldensity.censoring` subpackage ports the IPCW/EM notebooks to the modern codebase while reusing the same HAL utilities as the uncensored estimators:
-
-- `KaplanMeier` and `compute_ipcw_weights` estimate the censoring survival \(S_c\) and Δ / \(S_c(T)\) weights.
-- `WeightedCVXPYEstimator` reproduces the IPCW-HAL-MLE initializer (per-sample weights, intercept constraint option, solver waterfall).
-- `EMIPCWEstimator` reuses the initializer, performs multiple-imputation E-steps, and runs a weighted HAL M-step via the shared estimator stack.
-- `CensoredOptunaHyperparameterTuner` lets you choose between incomplete-data log-likelihood and MI-pooled complete-data log-likelihood and exposes the knobs used in the notebooks (`use_sc_adjustment`, solver selections, EM tolerances, etc.).
-- `haldensity.censoring.pipelines` packages the workflows into `run_ipcw_hal_mle` / `run_em_ipcw_hal_mle`, returning standardized HAL payloads (and optionally the fitted estimator) so notebooks/tests can focus on analysis rather than boilerplate.
-
-Example:
-
-```python
-from haldensity.censoring import pipelines, CensoredOptunaHyperparameterTuner
-
-# Fit EM–IPCW–HAL–MLE
-results, est = pipelines.run_em_ipcw_hal_mle(
-    data=censored_df, norm_constraint=350, m_imputations=50,
-    max_em_iter=5, return_estimator=True,
-)
-
-# Tune hyperparameters with Optuna on incomplete-data log-likelihood
-tuner = CensoredOptunaHyperparameterTuner(
-    "EMIPCWEstimator",
-    data=censored_df,
-    metric="incomplete",       # or "mi_complete"
-    param_overrides={"use_sc_adjustment": {"choices": [False, True]}},
-)
-tuner.optimize(n_trials=25)
-best_est = tuner.fit_best_model()
-```
-
-`metric="incomplete"` optimizes the Δ log f + (1−Δ) log S criterion used in the notebooks,
-while `metric="mi_complete"` switches to the MI-pooled complete-data proxy without changing
-any other tuner code.
-
-Validation:
-
-- `gtimeout 60s uv run censor_data_comp_tests.py` exercises the full pipeline on a truncated-normal DGP and checks KL divergence (< 0.1) plus monotone log-likelihood growth.
-- Additional smoke tests (`test_censored_complete.py`, `test_em_only.py`, etc.) and the historical notebooks remain for parity; once satisfied, follow `HALDENSITY_CLEANUP_GUIDE.md` if you want to remove temporary assets.
-- The regression script accepts CLI overrides (`python censor_data_comp_tests.py --help`) so CI can dial down runtime or stress-test different settings.
-
-See `src/haldensity/censoring/README.md` for module-by-module documentation, references back to `censored_data_workflow.md`, and tips on reproducing the historical experiments without PyTorch.
 
 Repository Structure
 
