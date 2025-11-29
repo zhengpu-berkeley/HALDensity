@@ -1,39 +1,92 @@
 """Censored data density estimation module.
 
-This module provides tools for HAL-based density estimation with right-censored data:
+This module provides tools for HAL-based density estimation with right-censored data.
+Future versions will support left-censoring and interval-censoring.
 
-Estimators:
-- WeightedCVXPYEstimator: IPCW-weighted HAL density estimator
-- EMIPCWEstimator: Combined IPCW initialization + EM refinement
-- EMStage: Standalone EM refinement stage (works with any initial estimator)
+Estimators
+----------
+RightCensoredIPCWEstimator : IPCW-weighted HAL density estimator for right-censored data
+RightCensoredEMEstimator : Combined IPCW initialization + EM refinement
+RightCensoredEMStage : Standalone EM refinement stage (works with any initial estimator)
 
-Tuners:
-- CensoredOptunaHyperparameterTuner: Joint CV tuner for IPCW or EM estimators
-- TwoStageCensoredTuner: Two-stage tuner (fast IPCW + focused EM)
-- EMStageTuner: Standalone tuner for EM refinement
+Tuners
+------
+RightCensoredOptunaHyperparameterTuner : Joint CV tuner for IPCW or EM estimators
+RightCensoredTwoStageTuner : Two-stage tuner (fast IPCW + focused EM)
+RightCensoredEMStageTuner : Standalone tuner for EM refinement
 
-Utilities:
-- KaplanMeier: Kaplan-Meier estimator for censoring survival
-- compute_ipcw_weights: Compute IPCW weights
-- incomplete_loglik, mi_complete_loglik, kl_divergence: Evaluation metrics
-- pipelines: Convenience functions for common workflows
+Utilities
+---------
+KaplanMeier : Kaplan-Meier estimator for censoring survival
+compute_ipcw_weights : Compute IPCW weights
+incomplete_loglik : Incomplete-data log-likelihood for right-censored data
+mi_complete_loglik : MI-pooled complete-data log-likelihood
+kl_divergence : KL divergence between true and estimated density
+
+Submodules
+----------
+right : Right-censoring specific implementations
+core : Core protocols and models
+tuners : Hyperparameter tuning classes
+utils : Shared utilities
+pipelines : Convenience workflow functions
+
+Examples
+--------
+>>> from haldensity.censoring import (
+...     KaplanMeier,
+...     compute_ipcw_weights,
+...     RightCensoredIPCWEstimator,
+...     RightCensoredEMEstimator,
+... )
+>>> 
+>>> # Fit Kaplan-Meier for censoring survival
+>>> km = KaplanMeier().fit(data, time_col="T", delta_col="Delta")
+>>> 
+>>> # Compute IPCW weights
+>>> weights = compute_ipcw_weights(data["T"], data["Delta"], km.predict)
+>>> 
+>>> # Fit IPCW estimator
+>>> uncensored = data[data["Delta"] == 1]
+>>> ipcw_est = RightCensoredIPCWEstimator(norm_constraint=50.0).fit(
+...     pd.DataFrame({"W1": uncensored["T"]}),
+...     sample_weights=weights[data["Delta"] == 1],
+... )
+>>> 
+>>> # Or use EM estimator directly
+>>> em_est = RightCensoredEMEstimator(norm_constraint=50.0, m_imputations=20).fit(data)
 """
 
-from .km import KaplanMeier
-from .weights import compute_ipcw_weights
-from .metrics import (
+# Right-censoring module
+from .right import (
+    KaplanMeier,
+    compute_ipcw_weights,
+    RightCensoredIPCWEstimator,
+    RightCensoredEMEstimator,
+    RightCensoredEMStage,
     incomplete_loglik,
     mi_complete_loglik,
-    kl_divergence,
 )
-from .weighted_cvxpy_estimator import WeightedCVXPYEstimator
-from .em import EMStage, EMStageResult, EMIPCWEstimator
-from .optuna_cv import (
-    CensoredOptunaHyperparameterTuner,
-    TwoStageCensoredTuner,
-    EMStageTuner,
+
+# Core models
+from .core.models import RightCensoredEMStageResult
+
+# Tuners
+from .tuners import (
+    RightCensoredOptunaHyperparameterTuner,
+    RightCensoredTwoStageTuner,
+    RightCensoredEMStageTuner,
 )
+
+# Shared utilities
+from .utils.common_metrics import kl_divergence
+
+# Submodules
 from . import pipelines
+from . import right
+from . import core
+from . import tuners
+from . import utils
 
 __all__ = [
     # Utilities
@@ -43,15 +96,19 @@ __all__ = [
     "incomplete_loglik",
     "mi_complete_loglik",
     "kl_divergence",
-    # Estimators
-    "WeightedCVXPYEstimator",
-    "EMStage",
-    "EMStageResult",
-    "EMIPCWEstimator",
+    # Estimators (explicit names - preferred)
+    "RightCensoredIPCWEstimator",
+    "RightCensoredEMEstimator",
+    "RightCensoredEMStage",
+    "RightCensoredEMStageResult",
     # Tuners
-    "CensoredOptunaHyperparameterTuner",
-    "TwoStageCensoredTuner",
-    "EMStageTuner",
-    # Pipelines
+    "RightCensoredOptunaHyperparameterTuner",
+    "RightCensoredTwoStageTuner",
+    "RightCensoredEMStageTuner",
+    # Submodules
     "pipelines",
+    "right",
+    "core",
+    "tuners",
+    "utils",
 ]
