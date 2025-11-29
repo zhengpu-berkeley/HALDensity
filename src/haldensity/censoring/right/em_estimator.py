@@ -11,11 +11,11 @@ import numpy as np
 import pandas as pd
 
 from haldensity.estimation.base_estimator import BaseEstimator
-from haldensity.censoring.core.models import EMStageResult, EM_DEFAULTS
+from haldensity.censoring.core.models import RightCensoredEMStageResult, EM_DEFAULTS
 from .km import KaplanMeier
 from .weights import compute_ipcw_weights
 from .ipcw_estimator import RightCensoredIPCWEstimator
-from .em_stage import EMStage
+from .em_stage import RightCensoredEMStage
 
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ class RightCensoredEMEstimator(BaseEstimator):
 
     This estimator combines:
     1. IPCW-HAL-MLE initialization on uncensored observations
-    2. EM refinement via EMStage with multiple imputation for censored observations
+    2. EM refinement via RightCensoredEMStage with multiple imputation for censored observations
 
     The EM algorithm alternates between:
     - E-step: Sample T* from f(T* | T* > C, theta) for censored observations
@@ -138,7 +138,7 @@ class RightCensoredEMEstimator(BaseEstimator):
         self.em_iterations_: int = 0
         self.em_converged_: bool = False
         self._current_estimator: Optional[BaseEstimator] = None
-        self._em_stage_result: Optional[EMStageResult] = None
+        self._em_stage_result: Optional[RightCensoredEMStageResult] = None
 
     def _init_ipcw(self, data: pd.DataFrame) -> RightCensoredIPCWEstimator:
         """Fit initial IPCW-weighted HAL estimator on uncensored observations."""
@@ -192,7 +192,7 @@ class RightCensoredEMEstimator(BaseEstimator):
         init_est = self._init_ipcw(data)
 
         # Step 2: Run EM stage
-        em_stage = EMStage(
+        em_stage = RightCensoredEMStage(
             m_imputations=self.m_imputations,
             max_em_iter=self.max_em_iter,
             em_tol=self.em_tol,

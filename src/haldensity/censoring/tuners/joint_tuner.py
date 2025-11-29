@@ -20,19 +20,19 @@ from haldensity.censoring.right.metrics import incomplete_loglik
 from ._base import IPCWFittingMixin, get_estimator_class
 
 
-class CensoredOptunaHyperparameterTuner(IPCWFittingMixin):
+class RightCensoredOptunaHyperparameterTuner(IPCWFittingMixin):
     """Censoring-aware CV tuner supporting IPCW and EM estimators.
 
     Tunable parameters:
-    - WeightedCVXPYEstimator: basis_order, norm_constraint
-    - EMIPCWEstimator: basis_order, norm_constraint, m_step_norm_multiplier
+    - RightCensoredIPCWEstimator: basis_order, norm_constraint
+    - RightCensoredEMEstimator: basis_order, norm_constraint, m_step_norm_multiplier
 
     Metric: Incomplete-data log-likelihood (sum Delta * log f + (1-Delta) * log S)
 
     Parameters
     ----------
     estimator_name : str
-        Either "EMIPCWEstimator" or "WeightedCVXPYEstimator".
+        Either "RightCensoredEMEstimator" or "RightCensoredIPCWEstimator".
     data : pd.DataFrame
         DataFrame with columns 'T' (observed time) and 'Delta' (event indicator).
     cv_folds : int
@@ -50,8 +50,8 @@ class CensoredOptunaHyperparameterTuner(IPCWFittingMixin):
 
     Examples
     --------
-    >>> tuner = CensoredOptunaHyperparameterTuner(
-    ...     estimator_name="EMIPCWEstimator",
+    >>> tuner = RightCensoredOptunaHyperparameterTuner(
+    ...     estimator_name="RightCensoredEMEstimator",
     ...     data=data,
     ...     cv_folds=5,
     ... )
@@ -132,8 +132,8 @@ class CensoredOptunaHyperparameterTuner(IPCWFittingMixin):
             "norm_constraint": norm_constraint,
         }
 
-        # EMIPCWEstimator also tunes m_step_norm_multiplier
-        if self.estimator_name in ("EMIPCWEstimator", "RightCensoredEMEstimator"):
+        # RightCensoredEMEstimator also tunes m_step_norm_multiplier
+        if self.estimator_name in ("RightCensoredEMEstimator"):
             mult_spec = ovr.get(
                 "m_step_norm_multiplier", {"low": 0.5, "high": 1.0, "log": True}
             )
@@ -159,10 +159,7 @@ class CensoredOptunaHyperparameterTuner(IPCWFittingMixin):
             val_df = self.data.iloc[val_idx].reset_index(drop=True)
 
             try:
-                if self.estimator_name in (
-                    "WeightedCVXPYEstimator",
-                    "RightCensoredIPCWEstimator",
-                ):
+                if self.estimator_name in ("RightCensoredIPCWEstimator"):
                     # IPCW baseline on uncensored only
                     km = KaplanMeier().fit(train_df, time_col="T", delta_col="Delta")
                     T_vals = np.asarray(train_df["T"].values, dtype=float)
@@ -293,10 +290,7 @@ class CensoredOptunaHyperparameterTuner(IPCWFittingMixin):
 
         params = self.best_params
 
-        if self.estimator_name in (
-            "WeightedCVXPYEstimator",
-            "RightCensoredIPCWEstimator",
-        ):
+        if self.estimator_name in ("RightCensoredIPCWEstimator"):
             km = KaplanMeier().fit(self.data, time_col="T", delta_col="Delta")
             T_vals = np.asarray(self.data["T"].values, dtype=float)
             Delta_vals = np.asarray(self.data["Delta"].values, dtype=int)

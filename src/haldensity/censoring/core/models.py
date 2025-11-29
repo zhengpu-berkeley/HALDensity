@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict
 class EMDefaults(BaseModel):
     """Default parameters for EM algorithm.
 
-    These defaults are shared across EMStage, EMIPCWEstimator, and tuners.
+    These defaults are shared across RightCensoredEMStage, EMIPCWEstimator, and tuners.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -49,8 +49,8 @@ EM_DEFAULTS = EMDefaults()
 TUNER_DEFAULTS = TunerDefaults()
 
 
-class EMStageResult:
-    """Container for EMStage results.
+class RightCensoredEMStageResult:
+    """Container for RightCensoredEMStage results.
 
     Attributes
     ----------
@@ -82,7 +82,7 @@ class EMStageResult:
 
     def __repr__(self) -> str:
         return (
-            f"EMStageResult(em_iterations={self.em_iterations}, "
+            f"RightCensoredEMStageResult(em_iterations={self.em_iterations}, "
             f"em_converged={self.em_converged}, "
             f"theta_path_len={len(self.theta_path)})"
         )

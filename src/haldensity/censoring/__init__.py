@@ -5,15 +5,15 @@ Future versions will support left-censoring and interval-censoring.
 
 Estimators
 ----------
-WeightedCVXPYEstimator : IPCW-weighted HAL density estimator (alias for RightCensoredIPCWEstimator)
-EMIPCWEstimator : Combined IPCW initialization + EM refinement (alias for RightCensoredEMEstimator)
-EMStage : Standalone EM refinement stage (works with any initial estimator)
+RightCensoredIPCWEstimator : IPCW-weighted HAL density estimator for right-censored data
+RightCensoredEMEstimator : Combined IPCW initialization + EM refinement
+RightCensoredEMStage : Standalone EM refinement stage (works with any initial estimator)
 
 Tuners
 ------
-CensoredOptunaHyperparameterTuner : Joint CV tuner for IPCW or EM estimators
-TwoStageCensoredTuner : Two-stage tuner (fast IPCW + focused EM)
-EMStageTuner : Standalone tuner for EM refinement
+RightCensoredOptunaHyperparameterTuner : Joint CV tuner for IPCW or EM estimators
+RightCensoredTwoStageTuner : Two-stage tuner (fast IPCW + focused EM)
+RightCensoredEMStageTuner : Standalone tuner for EM refinement
 
 Utilities
 ---------
@@ -36,8 +36,8 @@ Examples
 >>> from haldensity.censoring import (
 ...     KaplanMeier,
 ...     compute_ipcw_weights,
-...     WeightedCVXPYEstimator,
-...     EMIPCWEstimator,
+...     RightCensoredIPCWEstimator,
+...     RightCensoredEMEstimator,
 ... )
 >>> 
 >>> # Fit Kaplan-Meier for censoring survival
@@ -48,38 +48,34 @@ Examples
 >>> 
 >>> # Fit IPCW estimator
 >>> uncensored = data[data["Delta"] == 1]
->>> ipcw_est = WeightedCVXPYEstimator(norm_constraint=50.0).fit(
+>>> ipcw_est = RightCensoredIPCWEstimator(norm_constraint=50.0).fit(
 ...     pd.DataFrame({"W1": uncensored["T"]}),
 ...     sample_weights=weights[data["Delta"] == 1],
 ... )
 >>> 
 >>> # Or use EM estimator directly
->>> em_est = EMIPCWEstimator(norm_constraint=50.0, m_imputations=20).fit(data)
+>>> em_est = RightCensoredEMEstimator(norm_constraint=50.0, m_imputations=20).fit(data)
 """
 
-# Re-export from right-censoring module with backward-compatible aliases
+# Right-censoring module
 from .right import (
     KaplanMeier,
     compute_ipcw_weights,
     RightCensoredIPCWEstimator,
     RightCensoredEMEstimator,
-    EMStage,
+    RightCensoredEMStage,
     incomplete_loglik,
     mi_complete_loglik,
 )
 
-# Backward-compatible aliases
-WeightedCVXPYEstimator = RightCensoredIPCWEstimator
-EMIPCWEstimator = RightCensoredEMEstimator
-
 # Core models
-from .core.models import EMStageResult
+from .core.models import RightCensoredEMStageResult
 
 # Tuners
 from .tuners import (
-    CensoredOptunaHyperparameterTuner,
-    TwoStageCensoredTuner,
-    EMStageTuner,
+    RightCensoredOptunaHyperparameterTuner,
+    RightCensoredTwoStageTuner,
+    RightCensoredEMStageTuner,
 )
 
 # Shared utilities
@@ -100,17 +96,15 @@ __all__ = [
     "incomplete_loglik",
     "mi_complete_loglik",
     "kl_divergence",
-    # Estimators (with aliases)
-    "WeightedCVXPYEstimator",
+    # Estimators (explicit names - preferred)
     "RightCensoredIPCWEstimator",
-    "EMIPCWEstimator",
     "RightCensoredEMEstimator",
-    "EMStage",
-    "EMStageResult",
+    "RightCensoredEMStage",
+    "RightCensoredEMStageResult",
     # Tuners
-    "CensoredOptunaHyperparameterTuner",
-    "TwoStageCensoredTuner",
-    "EMStageTuner",
+    "RightCensoredOptunaHyperparameterTuner",
+    "RightCensoredTwoStageTuner",
+    "RightCensoredEMStageTuner",
     # Submodules
     "pipelines",
     "right",

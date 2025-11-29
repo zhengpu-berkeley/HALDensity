@@ -7,7 +7,7 @@ from .km import KaplanMeier
 from .weights import compute_ipcw_weights
 from .ipcw_estimator import RightCensoredIPCWEstimator
 from .em_estimator import RightCensoredEMEstimator
-from .em_stage import EMStage
+from .em_stage import RightCensoredEMStage
 from .metrics import incomplete_loglik, mi_complete_loglik
 
 __all__ = [
@@ -15,7 +15,7 @@ __all__ = [
     "compute_ipcw_weights",
     "RightCensoredIPCWEstimator",
     "RightCensoredEMEstimator",
-    "EMStage",
+    "RightCensoredEMStage",
     "incomplete_loglik",
     "mi_complete_loglik",
 ]

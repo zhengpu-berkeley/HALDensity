@@ -1,2 +1,0 @@
-"""HALDensity test suite."""
-
