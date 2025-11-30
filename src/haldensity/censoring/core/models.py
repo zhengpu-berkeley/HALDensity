@@ -20,10 +20,10 @@ class EMDefaults(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     tol: float = 1e-4
-    m_imputations: int = 20
-    max_em_iter: int = 50
-    em_tol: float = 1e-3
-    e_step_n_grid: int = 1000
+    m_imputations: int = 100
+    max_em_iter: int = 10
+    em_tol: float = 1e-1
+    e_step_n_grid: int = 200
     use_sc_adjustment: bool = False
     m_step_solver: str = "ECOS"
     init_solver: str = "ECOS"
