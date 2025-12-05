@@ -233,7 +233,9 @@ class RightCensoredOptunaHyperparameterTuner(IPCWFittingMixin):
         dict
             Contains 'best_params', 'best_metric_value', and 'study'.
         """
-        self.study = optuna.create_study(direction="minimize")
+        # Use seeded sampler for reproducibility
+        sampler = optuna.samplers.TPESampler(seed=self.random_state)
+        self.study = optuna.create_study(direction="minimize", sampler=sampler)
 
         if not self.silent:
             progress = tqdm(total=n_trials, desc="Optuna CV", unit="trial")
