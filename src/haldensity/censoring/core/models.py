@@ -43,6 +43,13 @@ class TunerDefaults(BaseModel):
     solver: str = "ECOS"
     use_secondary_solver: bool = True
 
+    # Conservative adjustment settings (to reduce CV oversmoothing)
+    # Finds smallest norm_constraint where CV_LL >= max_CV_LL - k% * SD
+    use_conservative_adjustment: bool = True
+    conservative_k_percent: float = 0.05  # 5% of SD as threshold
+    conservative_max_steps: int = 50  # Maximum search steps
+    conservative_step_pct: float = 0.02  # 2% step size per step
+
 
 # Default instances for convenience
 EM_DEFAULTS = EMDefaults()
