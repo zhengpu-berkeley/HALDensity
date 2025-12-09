@@ -102,6 +102,7 @@ class RightCensoredIPCWEstimator(BaseEstimator):
         sample_weights: Optional[np.ndarray] = None,
         grid_points_override: Optional[np.ndarray] = None,
         warm_start_theta: Optional[np.ndarray] = None,
+        skip_coefficient_pruning: bool = False,
     ) -> "RightCensoredIPCWEstimator":
         """Fit the IPCW-weighted HAL density estimator.
 
@@ -116,6 +117,10 @@ class RightCensoredIPCWEstimator(BaseEstimator):
             Override the knot locations for the basis.
         warm_start_theta : np.ndarray | None
             Initial theta values for warm starting.
+        skip_coefficient_pruning : bool
+            If True, skip the pruning step that zeros out small coefficients.
+            This is used in the M-step of EM to keep the knot structure fixed.
+            Default is False.
 
         Returns
         -------
@@ -245,23 +250,29 @@ class RightCensoredIPCWEstimator(BaseEstimator):
         self.optimized_theta_raw = theta.value.copy()
         self.theta_hat = theta.value.copy()
 
-        # Prune small coefficients
+        # Prune small coefficients (skip if doing parametric EM M-step)
         poly_cols = self.basis_order if self.basis_order > 0 else 0
         knot_start = 1 + poly_cols
         if self.theta_hat.size < knot_start:
             knot_start = self.theta_hat.size
 
-        self.theta_hat[knot_start:] = np.where(
-            np.abs(self.theta_hat[knot_start:]) > self.tol,
-            self.theta_hat[knot_start:],
-            0,
-        )
-
-        non_zero_knot_indices = np.where(self.theta_hat[knot_start:] != 0)[0]
-        if non_zero_knot_indices.size > 0:
-            self.grid_points_hal_selected = grid_points_hal[non_zero_knot_indices].copy()
+        if skip_coefficient_pruning:
+            # For parametric EM: keep all coefficients, no selection/thresholding
+            # The grid_points_hal_selected is set to match the override grid
+            self.grid_points_hal_selected = grid_points_hal.copy()
         else:
-            self.grid_points_hal_selected = np.array([])
+            # Standard IPCW fitting: prune small coefficients
+            self.theta_hat[knot_start:] = np.where(
+                np.abs(self.theta_hat[knot_start:]) > self.tol,
+                self.theta_hat[knot_start:],
+                0,
+            )
+
+            non_zero_knot_indices = np.where(self.theta_hat[knot_start:] != 0)[0]
+            if non_zero_knot_indices.size > 0:
+                self.grid_points_hal_selected = grid_points_hal[non_zero_knot_indices].copy()
+            else:
+                self.grid_points_hal_selected = np.array([])
 
         # Compute normalized density
         output_grid = np.linspace(0.0, 1.0, self.n_grid_points)

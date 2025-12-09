@@ -354,9 +354,32 @@ class RightCensoredEMStage:
         from .metrics import incomplete_loglik
 
         # Extract required attributes from initial estimator
-        theta_full = np.asarray(initial_estimator.theta_hat, dtype=float).copy()
-        basis_grid_points = np.asarray(initial_estimator._grid_points_hal, dtype=float).copy()
+        # For parametric EM, we use the SELECTED knots (grid_points_hal_selected),
+        # not all candidate knots (_grid_points_hal). This keeps the model structure fixed.
+        basis_grid_points = np.asarray(initial_estimator.grid_points_hal_selected, dtype=float).copy()
         basis_order = int(initial_estimator.basis_order)
+        
+        # Extract theta values corresponding to the selected knots
+        # theta_hat has: [intercept, (optional poly coeffs), knot_coeffs...]
+        # We need to extract only the coefficients for selected knots
+        poly_cols = basis_order if basis_order > 0 else 0
+        knot_start = 1 + poly_cols
+        
+        # Get indices of selected knots in the original _grid_points_hal
+        all_knots = np.asarray(initial_estimator._grid_points_hal, dtype=float)
+        selected_indices = []
+        for knot in basis_grid_points:
+            idx = np.where(np.abs(all_knots - knot) < 1e-10)[0]
+            if len(idx) > 0:
+                selected_indices.append(idx[0])
+        
+        # Build theta_full for the selected knots only
+        # [intercept, (poly_coeffs if any), selected_knot_coeffs]
+        original_theta = np.asarray(initial_estimator.theta_hat, dtype=float)
+        theta_full = np.zeros(1 + poly_cols + len(basis_grid_points))
+        theta_full[:knot_start] = original_theta[:knot_start]  # intercept + poly
+        for i, orig_idx in enumerate(selected_indices):
+            theta_full[knot_start + i] = original_theta[knot_start + orig_idx]
 
         theta_path: list[np.ndarray] = [theta_full.copy()]
         current_estimator = initial_estimator
@@ -405,7 +428,9 @@ class RightCensoredEMStage:
                 raise RuntimeError("M-step estimator fitting failed - theta or grid points is None")
 
             theta_full = mstep_est.theta_hat.copy()
-            basis_grid_points = mstep_est._grid_points_hal.copy()
+            # NOTE: We do NOT update basis_grid_points here.
+            # For parametric EM, the knot structure remains fixed throughout all iterations.
+            # Only the coefficients (theta_full) are updated.
             theta_path.append(theta_full.copy())
 
             # Check convergence
@@ -444,7 +469,13 @@ class RightCensoredEMStage:
         warm_theta: np.ndarray,
         basis_order: int,
     ) -> RightCensoredIPCWEstimator:
-        """Fit weighted HAL estimator on pooled imputed data."""
+        """Fit weighted HAL estimator on pooled imputed data.
+        
+        This is a parametric EM M-step: we keep the basis functions (knot points)
+        fixed and only update the coefficients. The L1 norm constraint is still
+        applied for regularization, but we skip the coefficient pruning step
+        that would change which knots are "selected".
+        """
         weights = pooled_df["weight"].values.astype(float)
         df_values = pd.DataFrame({"W1": pooled_df["W1"].values})
 
@@ -464,5 +495,6 @@ class RightCensoredEMStage:
             sample_weights=weights,
             grid_points_override=grid_override,
             warm_start_theta=warm_theta if len(warm_theta) > 0 else None,
+            skip_coefficient_pruning=True,  # Parametric EM: keep knot structure fixed
         )
 
