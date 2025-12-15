@@ -65,6 +65,13 @@ class RightCensoredEMStageOverSmoothTuner:
     - forward-grid candidate selection (by knot-count reduction),
     - single-run EM refinement on full data for each candidate,
     - selection of best candidate by `selection`.
+
+    Notes on solver consistency
+    ---------------------------
+    To make Stage-2 "factor=1.0 IPCW" comparable to a Stage-1 IPCW refit at the same
+    `(basis_order*, λ*)`, Stage-2 lets you pass the IPCW solver configuration used for
+    the oversmooth IPCW initializations. The EM refinement is always run with the
+    **same solver** as the IPCW initializations to avoid solver-induced discrepancies.
     """
 
     def __init__(
@@ -75,6 +82,9 @@ class RightCensoredEMStageOverSmoothTuner:
         ipcw_params: dict[str, Any],
         random_state: int = TUNER_DEFAULTS.random_state,
         n_grid_points: int = TUNER_DEFAULTS.n_grid_points,
+        # IPCW init solver configuration (Stage-2 IPCW refits)
+        ipcw_solver: str = TUNER_DEFAULTS.solver,
+        ipcw_use_secondary_solver: bool = TUNER_DEFAULTS.use_secondary_solver,
         # Over-smoothing exploration
         oversmooth_factors: Optional[Iterable[float]] = None,
         # EM refinement configuration (NO CV)
@@ -84,7 +94,6 @@ class RightCensoredEMStageOverSmoothTuner:
         em_tol: float = EM_DEFAULTS.em_tol,
         em_use_sc_adjustment: bool = EM_DEFAULTS.use_sc_adjustment,
         em_e_step_n_grid: int = EM_DEFAULTS.e_step_n_grid,
-        em_m_step_solver: str = EM_DEFAULTS.m_step_solver,
         em_verbose: bool = False,
         # Selection
         selection: str = "em_ll",
@@ -108,6 +117,9 @@ class RightCensoredEMStageOverSmoothTuner:
         self.lambda_star = float(ipcw_params["norm_constraint"])
         self.basis_order_star = int(ipcw_params["basis_order"])
 
+        self.ipcw_solver = str(ipcw_solver)
+        self.ipcw_use_secondary_solver = bool(ipcw_use_secondary_solver)
+
         if oversmooth_factors is None:
             self.oversmooth_factors = [float(x) for x in np.linspace(0.5, 1.0, 11)]
         else:
@@ -121,7 +133,6 @@ class RightCensoredEMStageOverSmoothTuner:
         self.em_tol = float(em_tol)
         self.em_use_sc_adjustment = bool(em_use_sc_adjustment)
         self.em_e_step_n_grid = int(em_e_step_n_grid)
-        self.em_m_step_solver = str(em_m_step_solver)
         self.em_verbose = bool(em_verbose)
 
         self.selection = selection
@@ -225,8 +236,8 @@ class RightCensoredEMStageOverSmoothTuner:
                 norm_constraint=nc,
                 n_grid_points=self.n_grid_points,
                 basis_order=basis_order,
-                solver=TUNER_DEFAULTS.solver,
-                use_secondary_solver=TUNER_DEFAULTS.use_secondary_solver,
+                solver=self.ipcw_solver,
+                use_secondary_solver=self.ipcw_use_secondary_solver,
             )
             est.fit(ipcw_df, sample_weights=ipcw_weights)
 
@@ -309,7 +320,7 @@ class RightCensoredEMStageOverSmoothTuner:
                 use_sc_adjustment=self.em_use_sc_adjustment,
                 e_step_n_grid=self.em_e_step_n_grid,
                 tol=EM_DEFAULTS.tol,
-                m_step_solver=self.em_m_step_solver,
+                m_step_solver=self.ipcw_solver,
                 verbose=self.em_verbose,
                 rng_seed=self.random_state,
             )
