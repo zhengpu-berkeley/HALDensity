@@ -76,6 +76,7 @@ from .tuners import (
     RightCensoredOptunaHyperparameterTuner,
     RightCensoredTwoStageTuner,
     RightCensoredEMStageTuner,
+    RightCensoredEMStageOverSmoothTuner,
 )
 
 # Shared utilities
@@ -105,6 +106,7 @@ __all__ = [
     "RightCensoredOptunaHyperparameterTuner",
     "RightCensoredTwoStageTuner",
     "RightCensoredEMStageTuner",
+    "RightCensoredEMStageOverSmoothTuner",
     # Submodules
     "pipelines",
     "right",

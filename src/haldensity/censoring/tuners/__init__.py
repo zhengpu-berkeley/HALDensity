@@ -6,10 +6,12 @@ Provides Optuna-based cross-validation tuners for IPCW and EM estimators.
 from .joint_tuner import RightCensoredOptunaHyperparameterTuner
 from .two_stage_tuner import RightCensoredTwoStageTuner
 from .em_stage_tuner import RightCensoredEMStageTuner
+from .em_stage_oversmooth_tuner import RightCensoredEMStageOverSmoothTuner
 
 __all__ = [
     "RightCensoredOptunaHyperparameterTuner",
     "RightCensoredTwoStageTuner",
     "RightCensoredEMStageTuner",
+    "RightCensoredEMStageOverSmoothTuner",
 ]
 
