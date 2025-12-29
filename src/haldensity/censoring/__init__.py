@@ -1,7 +1,9 @@
 """Censored data density estimation module.
 
 This module provides tools for HAL-based density estimation with right-censored data.
-Future versions will support left-censoring and interval-censoring.
+This version supports:
+- Right-censoring
+- Interval-censoring (midpoint init + EM with truncated-to-interval imputation)
 
 Estimators
 ----------
@@ -68,6 +70,14 @@ from .right import (
     mi_complete_loglik,
 )
 
+# Interval-censoring module
+from .interval import (
+    IntervalCensoredMidpointEstimator,
+    IntervalCensoredEMStage,
+    IntervalCensoredEMEstimator,
+    incomplete_loglik_interval,
+)
+
 # Core models
 from .core.models import RightCensoredEMStageResult
 
@@ -77,6 +87,8 @@ from .tuners import (
     RightCensoredTwoStageTuner,
     RightCensoredEMStageTuner,
     RightCensoredEMStageOverSmoothTuner,
+    IntervalCensoredOptunaHyperparameterTuner,
+    IntervalCensoredEMStageOverSmoothTuner,
 )
 
 # Shared utilities
@@ -85,6 +97,7 @@ from .utils.common_metrics import kl_divergence
 # Submodules
 from . import pipelines
 from . import right
+from . import interval
 from . import core
 from . import tuners
 from . import utils
@@ -102,15 +115,24 @@ __all__ = [
     "RightCensoredEMEstimator",
     "RightCensoredEMStage",
     "RightCensoredEMStageResult",
+    # Interval-censoring estimators
+    "IntervalCensoredMidpointEstimator",
+    "IntervalCensoredEMEstimator",
+    "IntervalCensoredEMStage",
     # Tuners
     "RightCensoredOptunaHyperparameterTuner",
     "RightCensoredTwoStageTuner",
     "RightCensoredEMStageTuner",
     "RightCensoredEMStageOverSmoothTuner",
+    "IntervalCensoredOptunaHyperparameterTuner",
+    "IntervalCensoredEMStageOverSmoothTuner",
     # Submodules
     "pipelines",
     "right",
+    "interval",
     "core",
     "tuners",
     "utils",
+    # Interval metrics
+    "incomplete_loglik_interval",
 ]
