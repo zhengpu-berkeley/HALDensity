@@ -10,8 +10,10 @@ import pandas as pd
 
 from .right.km import KaplanMeier
 from .right.weights import compute_ipcw_weights
-from .right.ipcw_estimator import RightCensoredIPCWEstimator
-from .right.em_estimator import RightCensoredEMEstimator
+from .right.estimators import RightCensoredInitEstimator, RightCensoredEMEstimator
+
+# Backward compatibility alias
+RightCensoredIPCWEstimator = RightCensoredInitEstimator
 
 
 def run_ipcw_hal_mle(

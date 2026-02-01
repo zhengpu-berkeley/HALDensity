@@ -11,20 +11,28 @@ import pandas as pd
 import pytest
 
 # Right-censored imports
-from haldensity.censoring.right.ipcw_estimator import RightCensoredIPCWEstimator
-from haldensity.censoring.right.em_estimator import RightCensoredEMEstimator
-from haldensity.censoring.right.em_stage import RightCensoredEMStage
+from haldensity.censoring.right.estimators import (
+    RightCensoredInitEstimator,
+    RightCensoredEMEstimator,
+    RightCensoredEMStage,
+)
 from haldensity.censoring.right.km import KaplanMeier
 from haldensity.censoring.right.weights import compute_ipcw_weights
 from haldensity.censoring.right.metrics import incomplete_loglik
-from haldensity.censoring.tuners.em_stage_oversmooth_tuner import RightCensoredEMStageOverSmoothTuner
+from haldensity.censoring.tuners.right_tuners import RightCensoredEMTuner
 
 # Interval-censored imports
-from haldensity.censoring.interval.midpoint_estimator import IntervalCensoredMidpointEstimator
-from haldensity.censoring.interval.em_estimator import IntervalCensoredEMEstimator
-from haldensity.censoring.interval.em_stage import IntervalCensoredEMStage
+from haldensity.censoring.interval.estimators import (
+    IntervalCensoredInitEstimator,
+    IntervalCensoredEMEstimator,
+    IntervalCensoredEMStage,
+)
 from haldensity.censoring.interval.metrics import incomplete_loglik_interval
-from haldensity.censoring.tuners.interval_em_stage_oversmooth_tuner import IntervalCensoredEMStageOverSmoothTuner
+from haldensity.censoring.tuners.interval_tuners import IntervalCensoredEMTuner
+
+# Backward compatibility aliases
+RightCensoredIPCWEstimator = RightCensoredInitEstimator
+IntervalCensoredMidpointEstimator = IntervalCensoredInitEstimator
 
 from conftest import assert_density_close, assert_loglik_close
 
@@ -63,16 +71,18 @@ class TestRCPipelineOversmooth:
     ) -> None:
         """Verify oversmooth pipeline produces a valid fitted estimator."""
         # Run oversmooth tuner with limited factors for speed
-        tuner = RightCensoredEMStageOverSmoothTuner(
+        tuner = RightCensoredEMTuner(
             rc_data,
-            ipcw_params={"norm_constraint": 10.0, "basis_order": 0},
+            stage1_estimator=rc_stage1_estimator,
             oversmooth_factors=[0.8, 1.0],  # Limited for speed
             em_m_imputations=10,
             em_max_em_iter=5,
             silent=True,
+            do_over_smooth=True,
         )
         
-        best_estimator = tuner.fit_best_estimator()
+        result = tuner.optimize()
+        best_estimator = result.estimator
         
         # Verify estimator is fitted and produces valid output
         assert best_estimator is not None, "Oversmooth tuner should return an estimator"
@@ -109,16 +119,18 @@ class TestRCPipelineOversmooth:
         init_ll = incomplete_loglik(init_est, rc_data, time_col="T", delta_col="Delta")
         
         # Run oversmooth tuner
-        tuner = RightCensoredEMStageOverSmoothTuner(
+        tuner = RightCensoredEMTuner(
             rc_data,
-            ipcw_params={"norm_constraint": 10.0, "basis_order": 0},
+            stage1_estimator=init_est,
             oversmooth_factors=[1.0],  # Just baseline
             em_m_imputations=10,
             em_max_em_iter=5,
             silent=True,
+            do_over_smooth=True,
         )
         
-        best_est = tuner.fit_best_estimator()
+        result = tuner.optimize()
+        best_est = result.estimator
         final_ll = incomplete_loglik(best_est, rc_data, time_col="T", delta_col="Delta")
         
         # Both should be finite
@@ -186,17 +198,26 @@ class TestICPipelineOversmooth:
         self, ic_data: pd.DataFrame
     ) -> None:
         """Verify oversmooth pipeline produces a valid fitted estimator."""
+        # First fit a Stage 1 estimator
+        init_est = IntervalCensoredMidpointEstimator(
+            norm_constraint=10.0,
+            n_grid_points=100,
+            basis_order=0,
+        ).fit(ic_data, L_col="L", R_col="R")
+        
         # Run oversmooth tuner with limited factors for speed
-        tuner = IntervalCensoredEMStageOverSmoothTuner(
+        tuner = IntervalCensoredEMTuner(
             ic_data,
-            midpoint_params={"norm_constraint": 10.0, "basis_order": 0},
+            stage1_estimator=init_est,
             oversmooth_factors=[0.8, 1.0],  # Limited for speed
             em_m_imputations=10,
             em_max_em_iter=5,
             silent=True,
+            do_over_smooth=True,
         )
         
-        best_estimator = tuner.fit_best_estimator()
+        result = tuner.optimize()
+        best_estimator = result.estimator
         
         # Verify estimator is fitted and produces valid output
         assert best_estimator is not None, "Oversmooth tuner should return an estimator"
@@ -214,16 +235,25 @@ class TestICPipelineOversmooth:
         self, ic_data: pd.DataFrame
     ) -> None:
         """Verify IC oversmooth pipeline produces finite log-likelihood."""
-        tuner = IntervalCensoredEMStageOverSmoothTuner(
+        # First fit a Stage 1 estimator
+        init_est = IntervalCensoredMidpointEstimator(
+            norm_constraint=10.0,
+            n_grid_points=100,
+            basis_order=0,
+        ).fit(ic_data, L_col="L", R_col="R")
+        
+        tuner = IntervalCensoredEMTuner(
             ic_data,
-            midpoint_params={"norm_constraint": 10.0, "basis_order": 0},
+            stage1_estimator=init_est,
             oversmooth_factors=[1.0],  # Just baseline
             em_m_imputations=10,
             em_max_em_iter=5,
             silent=True,
+            do_over_smooth=True,
         )
         
-        best_est = tuner.fit_best_estimator()
+        result = tuner.optimize()
+        best_est = result.estimator
         ll = incomplete_loglik_interval(best_est, ic_data, L_col="L", R_col="R")
         
         assert np.isfinite(ll), f"Log-likelihood should be finite: {ll}"
