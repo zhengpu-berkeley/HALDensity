@@ -1,22 +1,29 @@
 """Right-censoring density estimation module.
 
-Provides IPCW-weighted HAL-MLE and EM-based estimators for right-censored data.
+Provides HAL-MLE and EM-based estimators for right-censored data.
 """
 
 from .km import KaplanMeier
 from .weights import compute_ipcw_weights
-from .ipcw_estimator import RightCensoredIPCWEstimator
-from .em_estimator import RightCensoredEMEstimator
-from .em_stage import RightCensoredEMStage
+from .estimators import (
+    RightCensoredInitEstimator,
+    RightCensoredIPCWEstimator,  # Alias for backward compatibility
+    RightCensoredEMEstimator,
+    RightCensoredEMStage,
+)
 from .metrics import incomplete_loglik, mi_complete_loglik
 
 __all__ = [
+    # Utilities
     "KaplanMeier",
     "compute_ipcw_weights",
-    "RightCensoredIPCWEstimator",
+    # Estimators (new names)
+    "RightCensoredInitEstimator",
     "RightCensoredEMEstimator",
     "RightCensoredEMStage",
+    # Backward compatibility alias
+    "RightCensoredIPCWEstimator",
+    # Metrics
     "incomplete_loglik",
     "mi_complete_loglik",
 ]
-

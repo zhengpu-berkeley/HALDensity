@@ -10,12 +10,14 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from haldensity.censoring.right.ipcw_estimator import RightCensoredIPCWEstimator
-from haldensity.censoring.right.em_estimator import RightCensoredEMEstimator
+from haldensity.censoring.right.estimators import RightCensoredInitEstimator, RightCensoredEMEstimator
 from haldensity.censoring.right.km import KaplanMeier
 from haldensity.censoring.right.weights import compute_ipcw_weights
-from haldensity.censoring.interval.midpoint_estimator import IntervalCensoredMidpointEstimator
-from haldensity.censoring.interval.em_estimator import IntervalCensoredEMEstimator
+from haldensity.censoring.interval.estimators import IntervalCensoredInitEstimator, IntervalCensoredEMEstimator
+
+# Backward compatibility aliases
+RightCensoredIPCWEstimator = RightCensoredInitEstimator
+IntervalCensoredMidpointEstimator = IntervalCensoredInitEstimator
 
 from conftest import (
     assert_theta_close,

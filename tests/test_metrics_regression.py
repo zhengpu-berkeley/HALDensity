@@ -9,15 +9,17 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from haldensity.censoring.right.ipcw_estimator import RightCensoredIPCWEstimator
-from haldensity.censoring.right.em_estimator import RightCensoredEMEstimator
+from haldensity.censoring.right.estimators import RightCensoredInitEstimator, RightCensoredEMEstimator
 from haldensity.censoring.right.km import KaplanMeier
 from haldensity.censoring.right.weights import compute_ipcw_weights
 from haldensity.censoring.right.metrics import incomplete_loglik, mi_complete_loglik
-from haldensity.censoring.interval.midpoint_estimator import IntervalCensoredMidpointEstimator
-from haldensity.censoring.interval.em_estimator import IntervalCensoredEMEstimator
+from haldensity.censoring.interval.estimators import IntervalCensoredInitEstimator, IntervalCensoredEMEstimator
 from haldensity.censoring.interval.metrics import incomplete_loglik_interval
 from haldensity.censoring.utils.common_metrics import kl_divergence
+
+# Backward compatibility aliases
+RightCensoredIPCWEstimator = RightCensoredInitEstimator
+IntervalCensoredMidpointEstimator = IntervalCensoredInitEstimator
 
 from conftest import assert_loglik_close, LOGLIK_RTOL, LOGLIK_ATOL
 

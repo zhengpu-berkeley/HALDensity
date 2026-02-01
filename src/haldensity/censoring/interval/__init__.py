@@ -1,25 +1,23 @@
-"""Interval-censored density estimation.
+"""Interval-censored density estimation module.
 
-This subpackage implements HAL-based density estimation when each observation is an
-interval [L, R] known to contain the true event time T*.
-
-Key design (mirrors right-censored implementation):
-- Stage 1: midpoint-imputed HAL-MLE initializer (deterministic).
-- Stage 2: parametric EM refinement with multiple imputation in the E-step:
-  sample T* ~ f_theta truncated to [L, R], and fit a weighted HAL-MLE in the M-step
-  while keeping the knot structure fixed.
+Provides HAL-MLE and EM-based estimators for interval-censored data.
 """
 
-from .midpoint_estimator import IntervalCensoredMidpointEstimator
-from .em_stage import IntervalCensoredEMStage
-from .em_estimator import IntervalCensoredEMEstimator
+from .estimators import (
+    IntervalCensoredInitEstimator,
+    IntervalCensoredMidpointEstimator,  # Alias for backward compatibility
+    IntervalCensoredEMEstimator,
+    IntervalCensoredEMStage,
+)
 from .metrics import incomplete_loglik_interval
 
 __all__ = [
-    "IntervalCensoredMidpointEstimator",
-    "IntervalCensoredEMStage",
+    # Estimators (new names)
+    "IntervalCensoredInitEstimator",
     "IntervalCensoredEMEstimator",
+    "IntervalCensoredEMStage",
+    # Backward compatibility alias
+    "IntervalCensoredMidpointEstimator",
+    # Metrics
     "incomplete_loglik_interval",
 ]
-
-
