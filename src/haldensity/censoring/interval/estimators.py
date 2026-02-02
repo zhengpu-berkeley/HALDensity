@@ -17,7 +17,8 @@ import cvxpy as cp
 
 from haldensity.estimation.base_estimator import BaseEstimator
 from haldensity.utils.basis import create_basis_functions
-from haldensity.censoring.core.models import RightCensoredEMStageResult, EM_DEFAULTS
+from haldensity.censoring._defaults import EMStageResult, EM_DEFAULTS
+from haldensity.censoring._base_mle import WeightedHALMLEEstimator
 
 
 logger = logging.getLogger(__name__)
@@ -294,10 +295,6 @@ class IntervalCensoredInitEstimator(BaseEstimator):
         return base
 
 
-# Alias for backward compatibility
-IntervalCensoredMidpointEstimator = IntervalCensoredInitEstimator
-
-
 # =============================================================================
 # E-step Sampling Functions
 # =============================================================================
@@ -471,7 +468,7 @@ class IntervalCensoredEMStage:
 
         return theta_full, basis_grid_points, basis_order
 
-    def run(self, initial_estimator: Any, data: pd.DataFrame) -> RightCensoredEMStageResult:
+    def run(self, initial_estimator: Any, data: pd.DataFrame) -> EMStageResult:
         """Run EM iterations from an initializer with selected knots."""
         from .metrics import incomplete_loglik_interval
 
@@ -547,7 +544,7 @@ class IntervalCensoredEMStage:
                 break
             prev_ll = curr_ll
 
-        return RightCensoredEMStageResult(
+        return EMStageResult(
             final_estimator=current_estimator,
             theta_path=theta_path,
             em_iterations=em_iterations,
@@ -561,16 +558,12 @@ class IntervalCensoredEMStage:
         grid_override: np.ndarray,
         warm_theta: np.ndarray,
         basis_order: int,
-    ) -> IntervalCensoredInitEstimator:
+    ) -> WeightedHALMLEEstimator:
         """Fit weighted HAL on pooled imputed data, keeping knot structure fixed."""
-        # We use IntervalCensoredInitEstimator for M-step as it's essentially
-        # a weighted HAL-MLE fit, just like the right-censored version
-        from haldensity.censoring.right.estimators import RightCensoredInitEstimator
-        
         weights = np.asarray(pooled_df["weight"].values, dtype=float)
         df_values = pd.DataFrame({"W1": pooled_df["W1"].values})
 
-        return RightCensoredInitEstimator(
+        return WeightedHALMLEEstimator(
             tol=self.tol,
             norm_constraint=self.norm_constraint,
             n_grid_points=self.n_grid_points,

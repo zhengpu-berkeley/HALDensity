@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import optuna
 
-from haldensity.censoring.core.models import EM_DEFAULTS, TUNER_DEFAULTS
+from haldensity.censoring._defaults import EM_DEFAULTS, TUNER_DEFAULTS
 from haldensity.censoring.right.estimators import (
     RightCensoredInitEstimator,
     RightCensoredEMStage,
@@ -378,8 +378,3 @@ class RightCensoredJointTuner:
         self.stage2_result = em_tuner.optimize()
         
         return (self.stage1_result, self.stage2_result)
-
-
-# Backward compatibility aliases
-RightCensoredOptunaHyperparameterTuner = RightCensoredInitTuner
-RightCensoredEMStageOverSmoothTuner = RightCensoredEMTuner

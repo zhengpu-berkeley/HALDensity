@@ -9,18 +9,12 @@ from .right_tuners import (
     RightCensoredInitTuner,
     RightCensoredEMTuner,
     RightCensoredJointTuner,
-    # Backward compatibility aliases
-    RightCensoredOptunaHyperparameterTuner,
-    RightCensoredEMStageOverSmoothTuner,
 )
 
 from .interval_tuners import (
     IntervalCensoredInitTuner,
     IntervalCensoredEMTuner,
     IntervalCensoredJointTuner,
-    # Backward compatibility aliases
-    IntervalCensoredOptunaHyperparameterTuner,
-    IntervalCensoredEMStageOverSmoothTuner,
 )
 
 __all__ = [
@@ -28,17 +22,12 @@ __all__ = [
     "TuningResult",
     "OverSmoothInitRecord",
     "OverSmoothEMRecord",
-    # Right-censored tuners (new names)
+    # Right-censored tuners
     "RightCensoredInitTuner",
     "RightCensoredEMTuner",
     "RightCensoredJointTuner",
-    # Interval-censored tuners (new names)
+    # Interval-censored tuners
     "IntervalCensoredInitTuner",
     "IntervalCensoredEMTuner",
     "IntervalCensoredJointTuner",
-    # Backward compatibility aliases
-    "RightCensoredOptunaHyperparameterTuner",
-    "RightCensoredEMStageOverSmoothTuner",
-    "IntervalCensoredOptunaHyperparameterTuner",
-    "IntervalCensoredEMStageOverSmoothTuner",
 ]

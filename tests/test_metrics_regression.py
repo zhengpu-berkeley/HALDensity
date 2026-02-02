@@ -17,10 +17,6 @@ from haldensity.censoring.interval.estimators import IntervalCensoredInitEstimat
 from haldensity.censoring.interval.metrics import incomplete_loglik_interval
 from haldensity.censoring.utils.common_metrics import kl_divergence
 
-# Backward compatibility aliases
-RightCensoredIPCWEstimator = RightCensoredInitEstimator
-IntervalCensoredMidpointEstimator = IntervalCensoredInitEstimator
-
 from conftest import assert_loglik_close, LOGLIK_RTOL, LOGLIK_ATOL
 
 
@@ -32,7 +28,7 @@ class TestRCMetrics:
     """Regression tests for right-censored metrics."""
 
     @pytest.fixture
-    def fitted_rc_init(self, rc_data: pd.DataFrame, rc_init_params: dict) -> RightCensoredIPCWEstimator:
+    def fitted_rc_init(self, rc_data: pd.DataFrame, rc_init_params: dict) -> RightCensoredInitEstimator:
         """Fit RC Init estimator."""
         km = KaplanMeier().fit(rc_data, time_col="T", delta_col="Delta")
         T_vals = np.asarray(rc_data["T"].values, dtype=float)
@@ -43,7 +39,7 @@ class TestRCMetrics:
         df_unc = pd.DataFrame({"W1": T_vals[unc_mask]})
         w_unc = weights[unc_mask]
         
-        est = RightCensoredIPCWEstimator(**rc_init_params)
+        est = RightCensoredInitEstimator(**rc_init_params)
         est.fit(df_unc, sample_weights=w_unc)
         return est
 
@@ -56,7 +52,7 @@ class TestRCMetrics:
 
     def test_rc_incomplete_loglik_init(
         self, 
-        fitted_rc_init: RightCensoredIPCWEstimator, 
+        fitted_rc_init: RightCensoredInitEstimator, 
         rc_data: pd.DataFrame, 
         rc_expected: dict
     ) -> None:
@@ -80,7 +76,7 @@ class TestRCMetrics:
 
     def test_rc_loglik_em_better_than_init(
         self,
-        fitted_rc_init: RightCensoredIPCWEstimator,
+        fitted_rc_init: RightCensoredInitEstimator,
         fitted_rc_em: RightCensoredEMEstimator,
         rc_data: pd.DataFrame,
     ) -> None:
@@ -105,9 +101,9 @@ class TestICMetrics:
     """Regression tests for interval-censored metrics."""
 
     @pytest.fixture
-    def fitted_ic_init(self, ic_data: pd.DataFrame, ic_init_params: dict) -> IntervalCensoredMidpointEstimator:
+    def fitted_ic_init(self, ic_data: pd.DataFrame, ic_init_params: dict) -> IntervalCensoredInitEstimator:
         """Fit IC Init estimator."""
-        est = IntervalCensoredMidpointEstimator(**ic_init_params)
+        est = IntervalCensoredInitEstimator(**ic_init_params)
         est.fit(ic_data, L_col="L", R_col="R")
         return est
 
@@ -120,7 +116,7 @@ class TestICMetrics:
 
     def test_ic_incomplete_loglik_init(
         self, 
-        fitted_ic_init: IntervalCensoredMidpointEstimator, 
+        fitted_ic_init: IntervalCensoredInitEstimator, 
         ic_data: pd.DataFrame, 
         ic_expected: dict
     ) -> None:
@@ -144,7 +140,7 @@ class TestICMetrics:
 
     def test_ic_loglik_finite(
         self,
-        fitted_ic_init: IntervalCensoredMidpointEstimator,
+        fitted_ic_init: IntervalCensoredInitEstimator,
         fitted_ic_em: IntervalCensoredEMEstimator,
         ic_data: pd.DataFrame,
     ) -> None:

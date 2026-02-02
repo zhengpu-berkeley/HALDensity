@@ -30,10 +30,6 @@ from haldensity.censoring.interval.estimators import (
 from haldensity.censoring.interval.metrics import incomplete_loglik_interval
 from haldensity.censoring.tuners.interval_tuners import IntervalCensoredEMTuner
 
-# Backward compatibility aliases
-RightCensoredIPCWEstimator = RightCensoredInitEstimator
-IntervalCensoredMidpointEstimator = IntervalCensoredInitEstimator
-
 from conftest import assert_density_close, assert_loglik_close
 
 
@@ -45,7 +41,7 @@ class TestRCPipelineOversmooth:
     """Test RC pipeline with oversmoothing (do_over_smooth=True behavior)."""
 
     @pytest.fixture
-    def rc_stage1_estimator(self, rc_data: pd.DataFrame) -> RightCensoredIPCWEstimator:
+    def rc_stage1_estimator(self, rc_data: pd.DataFrame) -> RightCensoredInitEstimator:
         """Fit Stage 1 IPCW estimator."""
         km = KaplanMeier().fit(rc_data, time_col="T", delta_col="Delta")
         T_vals = np.asarray(rc_data["T"].values, dtype=float)
@@ -56,7 +52,7 @@ class TestRCPipelineOversmooth:
         df_unc = pd.DataFrame({"W1": T_vals[unc_mask]})
         w_unc = weights[unc_mask]
         
-        est = RightCensoredIPCWEstimator(
+        est = RightCensoredInitEstimator(
             norm_constraint=10.0,
             n_grid_points=100,
             basis_order=0,
@@ -67,7 +63,7 @@ class TestRCPipelineOversmooth:
         return est
 
     def test_rc_pipeline_oversmooth_produces_valid_estimator(
-        self, rc_data: pd.DataFrame, rc_stage1_estimator: RightCensoredIPCWEstimator
+        self, rc_data: pd.DataFrame, rc_stage1_estimator: RightCensoredInitEstimator
     ) -> None:
         """Verify oversmooth pipeline produces a valid fitted estimator."""
         # Run oversmooth tuner with limited factors for speed
@@ -110,7 +106,7 @@ class TestRCPipelineOversmooth:
         df_unc = pd.DataFrame({"W1": T_vals[unc_mask]})
         w_unc = weights[unc_mask]
         
-        init_est = RightCensoredIPCWEstimator(
+        init_est = RightCensoredInitEstimator(
             norm_constraint=10.0,
             n_grid_points=100,
             basis_order=0,
@@ -153,7 +149,7 @@ class TestRCPipelineNoOversmooth:
         df_unc = pd.DataFrame({"W1": T_vals[unc_mask]})
         w_unc = weights[unc_mask]
         
-        init_est = RightCensoredIPCWEstimator(
+        init_est = RightCensoredInitEstimator(
             norm_constraint=10.0,
             n_grid_points=100,
             basis_order=0,
@@ -199,7 +195,7 @@ class TestICPipelineOversmooth:
     ) -> None:
         """Verify oversmooth pipeline produces a valid fitted estimator."""
         # First fit a Stage 1 estimator
-        init_est = IntervalCensoredMidpointEstimator(
+        init_est = IntervalCensoredInitEstimator(
             norm_constraint=10.0,
             n_grid_points=100,
             basis_order=0,
@@ -236,7 +232,7 @@ class TestICPipelineOversmooth:
     ) -> None:
         """Verify IC oversmooth pipeline produces finite log-likelihood."""
         # First fit a Stage 1 estimator
-        init_est = IntervalCensoredMidpointEstimator(
+        init_est = IntervalCensoredInitEstimator(
             norm_constraint=10.0,
             n_grid_points=100,
             basis_order=0,
@@ -265,7 +261,7 @@ class TestICPipelineNoOversmooth:
     def test_ic_pipeline_no_oversmooth_direct_em(self, ic_data: pd.DataFrame) -> None:
         """Verify direct Stage1 → EMStage pipeline works."""
         # Fit initial Midpoint estimator (Stage 1)
-        init_est = IntervalCensoredMidpointEstimator(
+        init_est = IntervalCensoredInitEstimator(
             norm_constraint=10.0,
             n_grid_points=100,
             basis_order=0,
@@ -301,7 +297,7 @@ class TestICPipelineNoOversmooth:
 
     def test_ic_pipeline_no_oversmooth_loglik_finite(self, ic_data: pd.DataFrame) -> None:
         """Verify IC direct EM pipeline produces finite log-likelihood."""
-        init_est = IntervalCensoredMidpointEstimator(
+        init_est = IntervalCensoredInitEstimator(
             norm_constraint=10.0,
             n_grid_points=100,
             basis_order=0,
