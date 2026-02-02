@@ -13,10 +13,8 @@ import time
 from typing import Any, Callable, Optional, Tuple
 import numpy as np
 import pandas as pd
-import cvxpy as cp
 
 from haldensity.estimation.base_estimator import BaseEstimator
-from haldensity.utils.basis import create_basis_functions
 from haldensity.censoring._defaults import EMStageResult, EM_DEFAULTS
 from haldensity.censoring._base_mle import WeightedHALMLEEstimator
 
@@ -422,12 +420,12 @@ class RightCensoredEMStage:
         grid_override: np.ndarray,
         warm_theta: np.ndarray,
         basis_order: int,
-    ) -> RightCensoredInitEstimator:
+    ) -> "RightCensoredInitEstimator":
         """Fit weighted HAL estimator on pooled imputed data."""
         weights = pooled_df["weight"].values.astype(float)
         df_values = pd.DataFrame({"W1": pooled_df["W1"].values})
 
-        return RightCensoredInitEstimator(
+        est = RightCensoredInitEstimator(
             tol=self.tol,
             norm_constraint=self.norm_constraint,
             n_grid_points=self.n_grid_points,
@@ -438,13 +436,15 @@ class RightCensoredEMStage:
             use_secondary_solver=True,
             solver_waterfall=self.m_step_solver_sequence,
             include_intercept_in_constraint=self.include_intercept_in_constraint,
-        ).fit(
+        )
+        est.fit(
             df_values,
             sample_weights=weights,
             grid_points_override=grid_override,
             warm_start_theta=warm_theta if len(warm_theta) > 0 else None,
             skip_coefficient_pruning=True,
         )
+        return est
 
 
 # =============================================================================
@@ -577,7 +577,7 @@ class RightCensoredEMEstimator(BaseEstimator):
         df_unc = pd.DataFrame({"W1": T_vals[uncensored_mask]})
         w_unc = weights[uncensored_mask]
 
-        return RightCensoredInitEstimator(
+        est = RightCensoredInitEstimator(
             tol=self.tol,
             norm_constraint=self.init_norm_constraint,
             n_grid_points=self.n_grid_points,
@@ -587,9 +587,11 @@ class RightCensoredEMEstimator(BaseEstimator):
             use_secondary_solver=False,
             solver=self.init_solver,
             include_intercept_in_constraint=True,
-        ).fit(df_unc, sample_weights=w_unc)
+        )
+        est.fit(df_unc, sample_weights=w_unc)
+        return est
 
-    def fit(self, data: pd.DataFrame) -> "RightCensoredEMEstimator":
+    def fit(self, data: pd.DataFrame, **kwargs: Any) -> "RightCensoredEMEstimator":  # type: ignore[override]
         """Fit the EM-IPCW-HAL estimator.
 
         Parameters

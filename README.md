@@ -158,7 +158,8 @@ Examples
 - `examples/example_density_estimator.ipynb`: quick demo of estimators
 - `examples/example_target_learning.ipynb`: targeting examples
 - `examples/example_case_study.ipynb`: real-data galaxy velocity case study
-- `examples/example_censored_pipeline.py`: minimal right-censored HAL workflow (pipelines + Optuna)
+- `examples/example_right_censored.ipynb`: right-censored density estimation workflow
+- `examples/example_interval_censored.ipynb`: interval-censored density estimation workflow
 
 Repository Structure
 

@@ -9,7 +9,6 @@ Provides:
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple
-import numpy as np
 import pandas as pd
 import optuna
 
@@ -24,8 +23,6 @@ from ._base import (
     BaseCensoredInitTuner,
     BaseCensoredEMTuner,
     TuningResult,
-    OverSmoothInitRecord,
-    OverSmoothEMRecord,
 )
 
 
@@ -120,28 +117,31 @@ class IntervalCensoredInitTuner(BaseCensoredInitTuner):
     ) -> float:
         """Evaluate parameters on a single CV fold."""
         est = IntervalCensoredInitEstimator(
-            tol=self._defaults["tol"],
+            tol=float(self._defaults["tol"]),
             norm_constraint=params["norm_constraint"],
             n_grid_points=self.n_grid_points,
             basis_order=params["basis_order"],
-            solver=self._defaults["solver"],
-            use_secondary_solver=self._defaults["use_secondary_solver"],
+            solver=str(self._defaults["solver"]),
+            use_secondary_solver=bool(self._defaults["use_secondary_solver"]),
             include_intercept_in_constraint=False,
-        ).fit(train_df, L_col=self.L_col, R_col=self.R_col)
+        )
+        est.fit(train_df, L_col=self.L_col, R_col=self.R_col)
         
         return incomplete_loglik_interval(est, val_df, L_col=self.L_col, R_col=self.R_col)
     
     def _fit_final_estimator(self, params: Dict[str, Any]) -> IntervalCensoredInitEstimator:
         """Fit final estimator on full data."""
-        return IntervalCensoredInitEstimator(
-            tol=self._defaults["tol"],
+        est = IntervalCensoredInitEstimator(
+            tol=float(self._defaults["tol"]),
             norm_constraint=params["norm_constraint"],
             n_grid_points=self.n_grid_points,
             basis_order=params["basis_order"],
-            solver=self._defaults["solver"],
-            use_secondary_solver=self._defaults["use_secondary_solver"],
+            solver=str(self._defaults["solver"]),
+            use_secondary_solver=bool(self._defaults["use_secondary_solver"]),
             include_intercept_in_constraint=False,
-        ).fit(self.data, L_col=self.L_col, R_col=self.R_col)
+        )
+        est.fit(self.data, L_col=self.L_col, R_col=self.R_col)
+        return est
 
 
 class IntervalCensoredEMTuner(BaseCensoredEMTuner):

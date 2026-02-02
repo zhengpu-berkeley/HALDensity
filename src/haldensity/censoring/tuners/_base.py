@@ -127,11 +127,11 @@ class BaseCensoredInitTuner(ABC):
         self.conservative_params: Optional[Dict[str, Any]] = None
         self.adjustment_results: Optional[list] = None
         
-        # Fixed defaults (non-tunable)
-        self._defaults = {
-            "tol": EM_DEFAULTS.tol,
-            "solver": TUNER_DEFAULTS.solver,
-            "use_secondary_solver": TUNER_DEFAULTS.use_secondary_solver,
+        # Fixed defaults (non-tunable) - typed explicitly for mypy
+        self._defaults: Dict[str, Any] = {
+            "tol": float(EM_DEFAULTS.tol),
+            "solver": str(TUNER_DEFAULTS.solver),
+            "use_secondary_solver": bool(TUNER_DEFAULTS.use_secondary_solver),
         }
     
     @abstractmethod
@@ -260,7 +260,8 @@ class BaseCensoredInitTuner(ABC):
             best_metric = {"value": float("-inf")}
             
             def update_progress(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
-                metric = -float(trial.value) if np.isfinite(trial.value) else float("-inf")
+                trial_val = trial.value if trial.value is not None else float("inf")
+                metric = -float(trial_val) if np.isfinite(trial_val) else float("-inf")
                 if metric > best_metric["value"]:
                     best_metric["value"] = metric
                 progress.update(1)
@@ -292,7 +293,8 @@ class BaseCensoredInitTuner(ABC):
             self.adjustment_results = None
             self.best_params = self.optuna_params
         
-        # Fit final estimator
+        # Fit final estimator - best_params is guaranteed non-None at this point
+        assert self.best_params is not None
         estimator = self._fit_final_estimator(self.best_params)
         
         metadata = {
@@ -612,7 +614,8 @@ class BaseCensoredEMTuner(ABC):
             best_metric = {"value": float("-inf")}
             
             def update_progress(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
-                metric = -float(trial.value) if np.isfinite(trial.value) else float("-inf")
+                trial_val = trial.value if trial.value is not None else float("inf")
+                metric = -float(trial_val) if np.isfinite(trial_val) else float("-inf")
                 if metric > best_metric["value"]:
                     best_metric["value"] = metric
                 progress.update(1)
