@@ -139,9 +139,16 @@ class BaseEstimator:
 
         grid_points, density = self.get_density()
         
-        # Count selected knots (non-zero coefficients for HAL basis, excluding intercept and polynomials)
+        # Count selected knots
+        # When grid_points_hal_selected is available (e.g., from EM M-step with skip_coefficient_pruning=True),
+        # use its length as the knot count to reflect the preserved knot structure.
+        # Otherwise, fall back to counting non-zero HAL coefficients.
         hal_coeffs = self.theta_hat[self.basis_order + 1:]
-        selected_knots_count = np.sum(np.abs(hal_coeffs) > self.tol)
+        selected_knots = getattr(self, 'grid_points_hal_selected', None)
+        if selected_knots is not None and len(selected_knots) > 0:
+            selected_knots_count = len(selected_knots)
+        else:
+            selected_knots_count = np.sum(np.abs(hal_coeffs) > self.tol)
         if self.do_log:
             self.logger.info(f"Number of selected knots: {int(selected_knots_count)}")
         
