@@ -39,7 +39,6 @@ from .right import (
     KaplanMeier,
     compute_ipcw_weights,
     RightCensoredInitEstimator,
-    RightCensoredIPCWEstimator,  # Backward compatibility alias
     RightCensoredEMEstimator,
     RightCensoredEMStage,
     incomplete_loglik,
@@ -49,42 +48,34 @@ from .right import (
 # Interval-censoring module
 from .interval import (
     IntervalCensoredInitEstimator,
-    IntervalCensoredMidpointEstimator,  # Backward compatibility alias
     IntervalCensoredEMEstimator,
     IntervalCensoredEMStage,
     incomplete_loglik_interval,
 )
 
-# Core models
-from .core.models import RightCensoredEMStageResult
+# Core models and defaults
+from ._defaults import EMStageResult
+
+# Shared base estimator
+from ._base_mle import WeightedHALMLEEstimator
 
 # Tuners
 from .tuners import (
-    # Result types
     TuningResult,
-    # Right-censored tuners (new names)
     RightCensoredInitTuner,
     RightCensoredEMTuner,
     RightCensoredJointTuner,
-    # Interval-censored tuners (new names)
     IntervalCensoredInitTuner,
     IntervalCensoredEMTuner,
     IntervalCensoredJointTuner,
-    # Backward compatibility aliases
-    RightCensoredOptunaHyperparameterTuner,
-    RightCensoredEMStageOverSmoothTuner,
-    IntervalCensoredOptunaHyperparameterTuner,
-    IntervalCensoredEMStageOverSmoothTuner,
 )
 
 # Shared utilities
 from .utils.common_metrics import kl_divergence
 
 # Submodules
-from . import pipelines
 from . import right
 from . import interval
-from . import core
 from . import tuners
 from . import utils
 
@@ -99,37 +90,28 @@ __all__ = [
     "kl_divergence",
     # Result types
     "TuningResult",
-    "RightCensoredEMStageResult",
-    # Right-censored estimators (new names)
+    "EMStageResult",
+    # Shared base estimator
+    "WeightedHALMLEEstimator",
+    # Right-censored estimators
     "RightCensoredInitEstimator",
     "RightCensoredEMEstimator",
     "RightCensoredEMStage",
-    # Right-censored estimators (backward compatibility)
-    "RightCensoredIPCWEstimator",
-    # Interval-censored estimators (new names)
+    # Interval-censored estimators
     "IntervalCensoredInitEstimator",
     "IntervalCensoredEMEstimator",
     "IntervalCensoredEMStage",
-    # Interval-censored estimators (backward compatibility)
-    "IntervalCensoredMidpointEstimator",
-    # Right-censored tuners (new names)
+    # Right-censored tuners
     "RightCensoredInitTuner",
     "RightCensoredEMTuner",
     "RightCensoredJointTuner",
-    # Interval-censored tuners (new names)
+    # Interval-censored tuners
     "IntervalCensoredInitTuner",
     "IntervalCensoredEMTuner",
     "IntervalCensoredJointTuner",
-    # Tuners (backward compatibility)
-    "RightCensoredOptunaHyperparameterTuner",
-    "RightCensoredEMStageOverSmoothTuner",
-    "IntervalCensoredOptunaHyperparameterTuner",
-    "IntervalCensoredEMStageOverSmoothTuner",
     # Submodules
-    "pipelines",
     "right",
     "interval",
-    "core",
     "tuners",
     "utils",
 ]

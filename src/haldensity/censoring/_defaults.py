@@ -1,6 +1,9 @@
-"""Pydantic models and dataclasses for censored data density estimation.
+"""Default configuration models and result containers for censored data density estimation.
 
-Contains result containers and default configuration models.
+Contains:
+- EMDefaults: Default parameters for EM algorithm
+- TunerDefaults: Default parameters for hyperparameter tuners
+- EMStageResult: Result container for EM stage outputs
 """
 
 from __future__ import annotations
@@ -56,8 +59,10 @@ EM_DEFAULTS = EMDefaults()
 TUNER_DEFAULTS = TunerDefaults()
 
 
-class RightCensoredEMStageResult:
-    """Container for RightCensoredEMStage results.
+class EMStageResult:
+    """Container for EM stage results.
+
+    Used by both RightCensoredEMStage and IntervalCensoredEMStage.
 
     Attributes
     ----------
@@ -89,8 +94,11 @@ class RightCensoredEMStageResult:
 
     def __repr__(self) -> str:
         return (
-            f"RightCensoredEMStageResult(em_iterations={self.em_iterations}, "
+            f"EMStageResult(em_iterations={self.em_iterations}, "
             f"em_converged={self.em_converged}, "
             f"theta_path_len={len(self.theta_path)})"
         )
 
+
+# Backward compatibility alias (will be removed in future)
+RightCensoredEMStageResult = EMStageResult

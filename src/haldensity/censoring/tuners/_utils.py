@@ -10,7 +10,7 @@ from typing import Any, Callable, Optional, Tuple
 import numpy as np
 import pandas as pd
 
-from haldensity.censoring.core.models import EM_DEFAULTS, TUNER_DEFAULTS
+from haldensity.censoring._defaults import EM_DEFAULTS, TUNER_DEFAULTS
 
 
 def create_s_c_predict(km: Any) -> Callable[[np.ndarray], np.ndarray]:

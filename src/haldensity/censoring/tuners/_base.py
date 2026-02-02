@@ -17,7 +17,7 @@ import pandas as pd
 import optuna
 from sklearn.model_selection import KFold
 
-from haldensity.censoring.core.models import EM_DEFAULTS, TUNER_DEFAULTS
+from haldensity.censoring._defaults import EM_DEFAULTS, TUNER_DEFAULTS
 
 
 class TuningResult(NamedTuple):

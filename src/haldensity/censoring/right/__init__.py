@@ -7,7 +7,6 @@ from .km import KaplanMeier
 from .weights import compute_ipcw_weights
 from .estimators import (
     RightCensoredInitEstimator,
-    RightCensoredIPCWEstimator,  # Alias for backward compatibility
     RightCensoredEMEstimator,
     RightCensoredEMStage,
 )
@@ -17,12 +16,10 @@ __all__ = [
     # Utilities
     "KaplanMeier",
     "compute_ipcw_weights",
-    # Estimators (new names)
+    # Estimators
     "RightCensoredInitEstimator",
     "RightCensoredEMEstimator",
     "RightCensoredEMStage",
-    # Backward compatibility alias
-    "RightCensoredIPCWEstimator",
     # Metrics
     "incomplete_loglik",
     "mi_complete_loglik",

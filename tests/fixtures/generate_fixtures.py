@@ -14,13 +14,11 @@ import pandas as pd
 from pathlib import Path
 
 # Estimators
-from haldensity.censoring.right.ipcw_estimator import RightCensoredIPCWEstimator
-from haldensity.censoring.right.em_estimator import RightCensoredEMEstimator
+from haldensity.censoring.right.estimators import RightCensoredInitEstimator, RightCensoredEMEstimator
 from haldensity.censoring.right.km import KaplanMeier
 from haldensity.censoring.right.weights import compute_ipcw_weights
 from haldensity.censoring.right.metrics import incomplete_loglik, mi_complete_loglik
-from haldensity.censoring.interval.midpoint_estimator import IntervalCensoredMidpointEstimator
-from haldensity.censoring.interval.em_estimator import IntervalCensoredEMEstimator
+from haldensity.censoring.interval.estimators import IntervalCensoredInitEstimator, IntervalCensoredEMEstimator
 from haldensity.censoring.interval.metrics import incomplete_loglik_interval
 from haldensity.censoring.utils.common_metrics import kl_divergence
 
@@ -124,7 +122,7 @@ def generate_interval_censored_data(n: int = N_SAMPLES, seed: int = SEED) -> pd.
     })
 
 
-def fit_rc_init_estimator(data: pd.DataFrame) -> tuple[RightCensoredIPCWEstimator, dict]:
+def fit_rc_init_estimator(data: pd.DataFrame) -> tuple[RightCensoredInitEstimator, dict]:
     """Fit RC Init (IPCW) estimator and return results."""
     # Compute IPCW weights
     km = KaplanMeier().fit(data, time_col="T", delta_col="Delta")
@@ -137,7 +135,7 @@ def fit_rc_init_estimator(data: pd.DataFrame) -> tuple[RightCensoredIPCWEstimato
     df_unc = pd.DataFrame({"W1": T_vals[unc_mask]})
     w_unc = weights[unc_mask]
     
-    est = RightCensoredIPCWEstimator(**RC_INIT_PARAMS)
+    est = RightCensoredInitEstimator(**RC_INIT_PARAMS)
     est.fit(df_unc, sample_weights=w_unc)
     
     return est, est.get_results()
@@ -150,9 +148,9 @@ def fit_rc_em_estimator(data: pd.DataFrame) -> tuple[RightCensoredEMEstimator, d
     return est, est.get_results()
 
 
-def fit_ic_init_estimator(data: pd.DataFrame) -> tuple[IntervalCensoredMidpointEstimator, dict]:
+def fit_ic_init_estimator(data: pd.DataFrame) -> tuple[IntervalCensoredInitEstimator, dict]:
     """Fit IC Init (Midpoint) estimator and return results."""
-    est = IntervalCensoredMidpointEstimator(**IC_INIT_PARAMS)
+    est = IntervalCensoredInitEstimator(**IC_INIT_PARAMS)
     est.fit(data, L_col="L", R_col="R")
     return est, est.get_results()
 

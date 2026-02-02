@@ -15,10 +15,6 @@ from haldensity.censoring.right.km import KaplanMeier
 from haldensity.censoring.right.weights import compute_ipcw_weights
 from haldensity.censoring.interval.estimators import IntervalCensoredInitEstimator, IntervalCensoredEMEstimator
 
-# Backward compatibility aliases
-RightCensoredIPCWEstimator = RightCensoredInitEstimator
-IntervalCensoredMidpointEstimator = IntervalCensoredInitEstimator
-
 from conftest import (
     assert_theta_close,
     assert_density_close,
@@ -35,10 +31,10 @@ from conftest import (
 # =============================================================================
 
 class TestRCInitEstimator:
-    """Regression tests for RightCensoredIPCWEstimator (future: RightCensoredInitEstimator)."""
+    """Regression tests for RightCensoredInitEstimator (future: RightCensoredInitEstimator)."""
 
     @pytest.fixture
-    def fitted_rc_init(self, rc_data: pd.DataFrame, rc_init_params: dict) -> RightCensoredIPCWEstimator:
+    def fitted_rc_init(self, rc_data: pd.DataFrame, rc_init_params: dict) -> RightCensoredInitEstimator:
         """Fit RC Init estimator with fixture data and params."""
         # Compute IPCW weights
         km = KaplanMeier().fit(rc_data, time_col="T", delta_col="Delta")
@@ -51,12 +47,12 @@ class TestRCInitEstimator:
         df_unc = pd.DataFrame({"W1": T_vals[unc_mask]})
         w_unc = weights[unc_mask]
         
-        est = RightCensoredIPCWEstimator(**rc_init_params)
+        est = RightCensoredInitEstimator(**rc_init_params)
         est.fit(df_unc, sample_weights=w_unc)
         return est
 
     def test_rc_init_estimator_theta_hat(
-        self, fitted_rc_init: RightCensoredIPCWEstimator, rc_expected: dict
+        self, fitted_rc_init: RightCensoredInitEstimator, rc_expected: dict
     ) -> None:
         """Verify theta_hat coefficients match expected values."""
         expected_theta = np.array(rc_expected["init"]["results"]["theta_hat"])
@@ -66,7 +62,7 @@ class TestRCInitEstimator:
         assert_theta_close(actual_theta, expected_theta, name="RC Init theta_hat")
 
     def test_rc_init_estimator_density(
-        self, fitted_rc_init: RightCensoredIPCWEstimator, rc_expected: dict, eval_points: np.ndarray
+        self, fitted_rc_init: RightCensoredInitEstimator, rc_expected: dict, eval_points: np.ndarray
     ) -> None:
         """Verify density values at evaluation points match expected."""
         expected_density = np.array(rc_expected["init"]["density_at_eval_points"])
@@ -75,7 +71,7 @@ class TestRCInitEstimator:
         assert_density_close(actual_density, expected_density, name="RC Init density")
 
     def test_rc_init_estimator_n_knots(
-        self, fitted_rc_init: RightCensoredIPCWEstimator, rc_expected: dict
+        self, fitted_rc_init: RightCensoredInitEstimator, rc_expected: dict
     ) -> None:
         """Verify number of selected knots matches expected."""
         expected_n_knots = rc_expected["init"]["results"]["n_selected_knots"]
@@ -87,7 +83,7 @@ class TestRCInitEstimator:
         )
 
     def test_rc_init_estimator_selected_knots(
-        self, fitted_rc_init: RightCensoredIPCWEstimator, rc_expected: dict
+        self, fitted_rc_init: RightCensoredInitEstimator, rc_expected: dict
     ) -> None:
         """Verify selected knot locations match expected."""
         expected_knots = np.array(rc_expected["init"]["results"]["grid_points_hal_selected"])
@@ -176,17 +172,17 @@ class TestRCEMEstimator:
 # =============================================================================
 
 class TestICInitEstimator:
-    """Regression tests for IntervalCensoredMidpointEstimator (future: IntervalCensoredInitEstimator)."""
+    """Regression tests for IntervalCensoredInitEstimator (future: IntervalCensoredInitEstimator)."""
 
     @pytest.fixture
-    def fitted_ic_init(self, ic_data: pd.DataFrame, ic_init_params: dict) -> IntervalCensoredMidpointEstimator:
+    def fitted_ic_init(self, ic_data: pd.DataFrame, ic_init_params: dict) -> IntervalCensoredInitEstimator:
         """Fit IC Init estimator with fixture data and params."""
-        est = IntervalCensoredMidpointEstimator(**ic_init_params)
+        est = IntervalCensoredInitEstimator(**ic_init_params)
         est.fit(ic_data, L_col="L", R_col="R")
         return est
 
     def test_ic_init_estimator_theta_hat(
-        self, fitted_ic_init: IntervalCensoredMidpointEstimator, ic_expected: dict
+        self, fitted_ic_init: IntervalCensoredInitEstimator, ic_expected: dict
     ) -> None:
         """Verify theta_hat coefficients match expected values."""
         expected_theta = np.array(ic_expected["init"]["results"]["theta_hat"])
@@ -196,7 +192,7 @@ class TestICInitEstimator:
         assert_theta_close(actual_theta, expected_theta, name="IC Init theta_hat")
 
     def test_ic_init_estimator_density(
-        self, fitted_ic_init: IntervalCensoredMidpointEstimator, ic_expected: dict, eval_points: np.ndarray
+        self, fitted_ic_init: IntervalCensoredInitEstimator, ic_expected: dict, eval_points: np.ndarray
     ) -> None:
         """Verify density values at evaluation points match expected."""
         expected_density = np.array(ic_expected["init"]["density_at_eval_points"])
@@ -205,7 +201,7 @@ class TestICInitEstimator:
         assert_density_close(actual_density, expected_density, name="IC Init density")
 
     def test_ic_init_estimator_n_knots(
-        self, fitted_ic_init: IntervalCensoredMidpointEstimator, ic_expected: dict
+        self, fitted_ic_init: IntervalCensoredInitEstimator, ic_expected: dict
     ) -> None:
         """Verify number of selected knots matches expected."""
         expected_n_knots = ic_expected["init"]["results"]["n_selected_knots"]
