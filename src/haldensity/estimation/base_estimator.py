@@ -222,17 +222,16 @@ class BaseEstimator:
             norm_grid_midpoints = norm_grid[:-1] + norm_delta / 2
             norm_delta_j = norm_delta
 
-        density_mid, delta_mid, max_log_f, norm_const = BaseEstimator.normalized_hal_density(
+        # Pass the caller's delta to ensure consistent normalization
+        density_mid, delta_used, max_log_f, norm_const = BaseEstimator.normalized_hal_density(
             grid=norm_grid_midpoints,
             theta_hat=theta_hat,
             basis_grid_points=basis_grid_points,
             basis_order=basis_order,
+            delta=norm_delta_j,
         )
 
-        if norm_delta_j is not None and not np.allclose(norm_delta_j, delta_mid):
-            delta_mid = norm_delta_j
-
-        if not np.isclose(np.sum(density_mid * delta_mid), 1.0):
+        if not np.isclose(np.sum(density_mid * delta_used), 1.0):
             LOGGER.warning("Density normalization failed to sum to 1 on the provided grid.")
 
         df_eval = pd.DataFrame({'W1': pts})
@@ -260,10 +259,22 @@ class BaseEstimator:
         basis_grid_points: np.ndarray,
         basis_order: int,
         include_intercept: bool = True,
+        delta: Optional[np.ndarray] = None,
     ) -> tuple[np.ndarray, np.ndarray, float, float]:
         """
         Evaluate exp(phi(x)^T theta) on `grid`, normalize it to integrate to 1, and
         return (density, delta, max_log, normalizer).
+
+        Args:
+            grid: Points at which to evaluate the density.
+            theta_hat: Fitted HAL coefficients.
+            basis_grid_points: Knot points for the HAL basis.
+            basis_order: Order of the truncated power basis.
+            include_intercept: Whether to include an intercept in the basis.
+            delta: Integration widths for normalization. If None, computed from grid.
+
+        Returns:
+            Tuple of (density, delta, max_log, normalizer).
         """
         grid_arr = np.asarray(grid, dtype=float).reshape(-1)
         theta_arr = np.asarray(theta_hat, dtype=float).ravel()
@@ -283,12 +294,21 @@ class BaseEstimator:
         max_log = float(np.max(log_density))
         density = np.exp(np.clip(log_density - max_log, -700, 700))
 
-        delta = BaseEstimator._integration_widths(grid_arr)
-        normalizer = float(np.sum(density * delta))
+        # Use provided delta or compute from grid
+        if delta is not None:
+            delta_arr = np.asarray(delta, dtype=float).ravel()
+            if delta_arr.size != grid_arr.size:
+                raise ValueError(
+                    f"Delta length ({delta_arr.size}) must match grid length ({grid_arr.size})."
+                )
+        else:
+            delta_arr = BaseEstimator._integration_widths(grid_arr)
+
+        normalizer = float(np.sum(density * delta_arr))
         if normalizer <= 0:
             raise ValueError("Density normalization constant must be positive.")
         density /= normalizer
-        return density, delta, max_log, normalizer
+        return density, delta_arr, max_log, normalizer
 
     def _get_interpolated_log_density(self, points: np.ndarray) -> np.ndarray:
         """
