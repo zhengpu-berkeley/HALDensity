@@ -103,7 +103,7 @@ class IntervalCensoredInitEstimator(BaseEstimator):
         R = np.asarray(df[R_col].values, dtype=float).ravel()
         return 0.5 * (L + R)
 
-    def fit(
+    def fit(  # type: ignore[override]
         self,
         data: pd.DataFrame,
         *,
@@ -112,6 +112,7 @@ class IntervalCensoredInitEstimator(BaseEstimator):
         grid_points_override: Optional[np.ndarray] = None,
         warm_start_theta: Optional[np.ndarray] = None,
         skip_coefficient_pruning: bool = False,
+        **kwargs: Any,
     ) -> "IntervalCensoredInitEstimator":
         """Fit the midpoint-imputed HAL-MLE.
 
@@ -268,6 +269,8 @@ class IntervalCensoredInitEstimator(BaseEstimator):
     def _normalized_density(self, points: np.ndarray) -> np.ndarray:
         if self._norm_shift is None or self._norm_Z is None:
             raise RuntimeError("Estimator must be fitted before requesting density")
+        if self._grid_points_hal is None:
+            raise RuntimeError("Estimator must be fitted before requesting density")
         pts = np.asarray(points, dtype=float).ravel()
         df_pts = pd.DataFrame({"W1": pts})
         basis_eval, _ = create_basis_functions(
@@ -279,6 +282,8 @@ class IntervalCensoredInitEstimator(BaseEstimator):
 
     def get_density(self) -> tuple[np.ndarray, np.ndarray]:
         if not self.is_fitted or self._density_midpoints is None:
+            raise ValueError("Estimator must be fitted before getting density.")
+        if self.grid_midpoints is None:
             raise ValueError("Estimator must be fitted before getting density.")
         return self.grid_midpoints, self._density_midpoints.copy()
 
@@ -643,7 +648,7 @@ class IntervalCensoredEMEstimator(BaseEstimator):
         self.em_converged_: bool = False
         self.uncensored_augmented_: Optional[pd.DataFrame] = None
         self._current_estimator: Optional[BaseEstimator] = None
-        self._em_stage_result = None
+        self._em_stage_result: Optional[EMStageResult] = None
 
     def _init_midpoint(self, data: pd.DataFrame) -> IntervalCensoredInitEstimator:
         return IntervalCensoredInitEstimator(
@@ -658,7 +663,7 @@ class IntervalCensoredEMEstimator(BaseEstimator):
             use_secondary_solver=False,
         ).fit(data, L_col=self.L_col, R_col=self.R_col)
 
-    def fit(self, data: pd.DataFrame) -> "IntervalCensoredEMEstimator":
+    def fit(self, data: pd.DataFrame, **kwargs: Any) -> "IntervalCensoredEMEstimator":  # type: ignore[override]
         if self.L_col not in data.columns or self.R_col not in data.columns:
             raise ValueError(f"data must contain columns {self.L_col!r} and {self.R_col!r}")
 

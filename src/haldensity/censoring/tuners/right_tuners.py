@@ -26,8 +26,6 @@ from ._base import (
     BaseCensoredInitTuner,
     BaseCensoredEMTuner,
     TuningResult,
-    OverSmoothInitRecord,
-    OverSmoothEMRecord,
 )
 
 
@@ -105,13 +103,14 @@ class RightCensoredInitTuner(BaseCensoredInitTuner):
         w_unc = weights[unc_mask]
         
         est = RightCensoredInitEstimator(
-            tol=self._defaults["tol"],
+            tol=float(self._defaults["tol"]),
             norm_constraint=params["norm_constraint"],
             n_grid_points=self.n_grid_points,
             basis_order=params["basis_order"],
-            solver=self._defaults["solver"],
-            use_secondary_solver=self._defaults["use_secondary_solver"],
-        ).fit(df_unc, sample_weights=w_unc)
+            solver=str(self._defaults["solver"]),
+            use_secondary_solver=bool(self._defaults["use_secondary_solver"]),
+        )
+        est.fit(df_unc, sample_weights=w_unc)
         
         return incomplete_loglik(est, val_df, time_col="T", delta_col="Delta")
     
@@ -127,14 +126,16 @@ class RightCensoredInitTuner(BaseCensoredInitTuner):
         df_unc = pd.DataFrame({"W1": T_vals[unc_mask]})
         w_unc = weights[unc_mask]
         
-        return RightCensoredInitEstimator(
-            tol=self._defaults["tol"],
+        est = RightCensoredInitEstimator(
+            tol=float(self._defaults["tol"]),
             norm_constraint=params["norm_constraint"],
             n_grid_points=self.n_grid_points,
             basis_order=params["basis_order"],
-            solver=self._defaults["solver"],
-            use_secondary_solver=self._defaults["use_secondary_solver"],
-        ).fit(df_unc, sample_weights=w_unc)
+            solver=str(self._defaults["solver"]),
+            use_secondary_solver=bool(self._defaults["use_secondary_solver"]),
+        )
+        est.fit(df_unc, sample_weights=w_unc)
+        return est
 
 
 class RightCensoredEMTuner(BaseCensoredEMTuner):
@@ -190,14 +191,16 @@ class RightCensoredEMTuner(BaseCensoredEMTuner):
         df_unc = pd.DataFrame({"W1": T_vals[unc_mask]})
         w_unc = weights[unc_mask]
         
-        return RightCensoredInitEstimator(
+        est = RightCensoredInitEstimator(
             tol=EM_DEFAULTS.tol,
             norm_constraint=norm_constraint,
             n_grid_points=self.n_grid_points,
             basis_order=self.basis_order,
             solver=self.solver,
             use_secondary_solver=self.use_secondary_solver,
-        ).fit(df_unc, sample_weights=w_unc)
+        )
+        est.fit(df_unc, sample_weights=w_unc)
+        return est
     
     def _compute_loglik(self, estimator: Any) -> float:
         """Compute log-likelihood for the given estimator."""
@@ -210,7 +213,9 @@ class RightCensoredEMTuner(BaseCensoredEMTuner):
     ) -> Any:
         """Run EM stage and return the EM result."""
         km = KaplanMeier().fit(self.data, time_col="T", delta_col="Delta")
-        s_c_predict = lambda t: np.atleast_1d(km.predict(t))
+        
+        def s_c_predict(t: np.ndarray) -> np.ndarray:
+            return np.atleast_1d(km.predict(t))
         
         em_stage = RightCensoredEMStage(
             m_imputations=self.em_m_imputations,
@@ -261,7 +266,9 @@ class RightCensoredEMTuner(BaseCensoredEMTuner):
         
         # Run EM
         m_step_norm_constraint = self.base_norm_constraint * m_step_norm_multiplier
-        s_c_predict = lambda t: np.atleast_1d(km.predict(t))
+        
+        def s_c_predict(t: np.ndarray) -> np.ndarray:
+            return np.atleast_1d(km.predict(t))
         
         em_stage = RightCensoredEMStage(
             m_imputations=self.em_m_imputations,

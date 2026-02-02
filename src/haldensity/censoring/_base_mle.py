@@ -7,7 +7,7 @@ right-censored and interval-censored estimators.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 import numpy as np
 import pandas as pd
 import cvxpy as cp
@@ -96,13 +96,14 @@ class WeightedHALMLEEstimator(BaseEstimator):
         self._norm_Z: Optional[float] = None
         self._density_midpoints: Optional[np.ndarray] = None
 
-    def fit(
+    def fit(  # type: ignore[override]
         self,
         data: pd.DataFrame,
         sample_weights: Optional[np.ndarray] = None,
         grid_points_override: Optional[np.ndarray] = None,
         warm_start_theta: Optional[np.ndarray] = None,
         skip_coefficient_pruning: bool = False,
+        **kwargs: Any,
     ) -> "WeightedHALMLEEstimator":
         """Fit the weighted HAL density estimator.
 
@@ -211,7 +212,7 @@ class WeightedHALMLEEstimator(BaseEstimator):
             warm_args = True
 
         def _solve_with_kwargs(solver_name: str, warm: bool) -> None:
-            solve_kwargs = {"solver": solver_name}
+            solve_kwargs: dict[str, Any] = {"solver": solver_name}
             if solver_name.upper() == "MOSEK" and self.max_threads is not None:
                 solve_kwargs["mosek_params"] = {"MSK_IPAR_NUM_THREADS": int(self.max_threads)}
             if warm:
@@ -303,6 +304,8 @@ class WeightedHALMLEEstimator(BaseEstimator):
         """Evaluate normalized density at points."""
         if self._norm_shift is None or self._norm_Z is None:
             raise RuntimeError("Estimator must be fitted before requesting density")
+        if self._grid_points_hal is None:
+            raise RuntimeError("Estimator must be fitted before requesting density")
 
         df_pts = pd.DataFrame({"W1": points})
         basis_eval, _ = create_basis_functions(
@@ -324,6 +327,8 @@ class WeightedHALMLEEstimator(BaseEstimator):
             (grid_midpoints, density_values)
         """
         if not self.is_fitted or self._density_midpoints is None:
+            raise ValueError("Estimator must be fitted before getting density.")
+        if self.grid_midpoints is None:
             raise ValueError("Estimator must be fitted before getting density.")
         return self.grid_midpoints, self._density_midpoints.copy()
 
