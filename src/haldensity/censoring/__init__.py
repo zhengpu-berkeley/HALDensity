@@ -17,7 +17,7 @@ IntervalCensoredEMStage : Standalone EM refinement stage
 Tuners
 ------
 RightCensoredInitTuner : Stage 1 tuner (Optuna CV)
-RightCensoredEMTuner : Stage 2 tuner (oversmooth or CV mode)
+RightCensoredEMTuner : Stage 2 tuner (oversmooth or direct no-oversmooth mode)
 RightCensoredJointTuner : Convenience wrapper (Stage 1 + Stage 2)
 
 IntervalCensoredInitTuner : Stage 1 tuner for interval-censored data

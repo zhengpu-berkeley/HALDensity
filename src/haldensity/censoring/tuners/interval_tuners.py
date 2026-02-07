@@ -2,7 +2,7 @@
 
 Provides:
 - IntervalCensoredInitTuner: Stage 1 (Init) tuner using Optuna CV
-- IntervalCensoredEMTuner: Stage 2 (EM) tuner with oversmooth or CV mode
+- IntervalCensoredEMTuner: Stage 2 (EM) tuner with oversmooth or direct no-oversmooth mode
 - IntervalCensoredJointTuner: Convenience wrapper running Init -> EM
 """
 
@@ -149,7 +149,7 @@ class IntervalCensoredEMTuner(BaseCensoredEMTuner):
     
     Supports two modes via `do_over_smooth`:
     - True (default): Grid search over oversmooth factors + EM refinement
-    - False: CV-based tuning of m_step_norm_multiplier
+    - False: Direct no-oversmooth EM refinement from Stage 1
     
     Parameters
     ----------
@@ -162,11 +162,9 @@ class IntervalCensoredEMTuner(BaseCensoredEMTuner):
     n_grid_points : int
         Number of grid points.
     do_over_smooth : bool
-        If True, use oversmooth grid. If False, use CV.
+        If True, use oversmooth grid. If False, run direct no-oversmooth EM.
     oversmooth_factors : list[float] | None
         Factors for oversmooth grid.
-    cv_folds : int
-        CV folds for CV mode.
     em_m_imputations : int
         Imputations for EM.
     em_max_em_iter : int
@@ -193,7 +191,6 @@ class IntervalCensoredEMTuner(BaseCensoredEMTuner):
         n_grid_points: int = TUNER_DEFAULTS.n_grid_points,
         do_over_smooth: bool = True,
         oversmooth_factors: Optional[list[float]] = None,
-        cv_folds: int = TUNER_DEFAULTS.cv_folds,
         em_m_imputations: int = EM_DEFAULTS.m_imputations,
         em_max_em_iter: int = 20,
         em_tol: float = EM_DEFAULTS.em_tol,
@@ -214,7 +211,6 @@ class IntervalCensoredEMTuner(BaseCensoredEMTuner):
             n_grid_points=n_grid_points,
             do_over_smooth=do_over_smooth,
             oversmooth_factors=oversmooth_factors,
-            cv_folds=cv_folds,
             em_m_imputations=em_m_imputations,
             em_max_em_iter=em_max_em_iter,
             em_tol=em_tol,
@@ -270,49 +266,6 @@ class IntervalCensoredEMTuner(BaseCensoredEMTuner):
             initial_estimator=initial_estimator,
             data=self.data,
         )
-    
-    def _evaluate_cv_fold(
-        self,
-        train_df: pd.DataFrame,
-        val_df: pd.DataFrame,
-        m_step_norm_multiplier: float,
-    ) -> float:
-        """Evaluate m_step_norm_multiplier on a CV fold."""
-        # Fit Stage 1 on training data
-        init_est = IntervalCensoredInitEstimator(
-            tol=EM_DEFAULTS.tol,
-            norm_constraint=self.base_norm_constraint,
-            n_grid_points=self.n_grid_points,
-            basis_order=self.basis_order,
-            solver=self.solver,
-            use_secondary_solver=self.use_secondary_solver,
-            include_intercept_in_constraint=False,
-        ).fit(train_df, L_col=self.L_col, R_col=self.R_col)
-        
-        # Run EM
-        m_step_norm_constraint = self.base_norm_constraint * m_step_norm_multiplier
-        
-        em_stage = IntervalCensoredEMStage(
-            m_imputations=self.em_m_imputations,
-            max_em_iter=min(10, self.em_max_em_iter),  # Fewer iterations for CV
-            em_tol=self.em_tol,
-            norm_constraint=m_step_norm_constraint,
-            n_grid_points=self.n_grid_points,
-            e_step_n_grid=self.em_e_step_n_grid,
-            tol=EM_DEFAULTS.tol,
-            m_step_solver=self.solver,
-            verbose=False,
-            rng_seed=self.random_state,
-            L_col=self.L_col,
-            R_col=self.R_col,
-        )
-        
-        em_result = em_stage.run(
-            initial_estimator=init_est,
-            data=train_df,
-        )
-        
-        return incomplete_loglik_interval(em_result.final_estimator, val_df, L_col=self.L_col, R_col=self.R_col)
 
 
 class IntervalCensoredJointTuner:
@@ -409,7 +362,6 @@ class IntervalCensoredJointTuner:
             n_grid_points=self.n_grid_points,
             do_over_smooth=self.do_over_smooth,
             oversmooth_factors=self.oversmooth_factors,
-            cv_folds=self.cv_folds,
             em_m_imputations=self.em_m_imputations,
             em_max_em_iter=self.em_max_em_iter,
             silent=self.silent,

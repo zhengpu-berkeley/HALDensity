@@ -2,7 +2,7 @@
 
 Provides:
 - RightCensoredInitTuner: Stage 1 (Init) tuner using Optuna CV
-- RightCensoredEMTuner: Stage 2 (EM) tuner with oversmooth or CV mode
+- RightCensoredEMTuner: Stage 2 (EM) tuner with oversmooth or direct no-oversmooth mode
 - RightCensoredJointTuner: Convenience wrapper running Init -> EM
 """
 
@@ -143,7 +143,7 @@ class RightCensoredEMTuner(BaseCensoredEMTuner):
     
     Supports two modes via `do_over_smooth`:
     - True (default): Grid search over oversmooth factors + EM refinement
-    - False: CV-based tuning of m_step_norm_multiplier
+    - False: Direct no-oversmooth EM refinement from Stage 1
     
     Parameters
     ----------
@@ -156,11 +156,9 @@ class RightCensoredEMTuner(BaseCensoredEMTuner):
     n_grid_points : int
         Number of grid points.
     do_over_smooth : bool
-        If True, use oversmooth grid. If False, use CV.
+        If True, use oversmooth grid. If False, run direct no-oversmooth EM.
     oversmooth_factors : list[float] | None
         Factors for oversmooth grid.
-    cv_folds : int
-        CV folds for CV mode.
     em_m_imputations : int
         Imputations for EM.
     em_max_em_iter : int
@@ -236,61 +234,6 @@ class RightCensoredEMTuner(BaseCensoredEMTuner):
             data=self.data,
             S_c_predict=s_c_predict,
         )
-    
-    def _evaluate_cv_fold(
-        self,
-        train_df: pd.DataFrame,
-        val_df: pd.DataFrame,
-        m_step_norm_multiplier: float,
-    ) -> float:
-        """Evaluate m_step_norm_multiplier on a CV fold."""
-        # Fit Stage 1 on training data
-        km = KaplanMeier().fit(train_df, time_col="T", delta_col="Delta")
-        
-        T_vals = np.asarray(train_df["T"].values, dtype=float)
-        Delta_vals = np.asarray(train_df["Delta"].values, dtype=int)
-        weights = compute_ipcw_weights(T_vals, Delta_vals, lambda t: np.atleast_1d(km.predict(t)))
-        
-        unc_mask = Delta_vals == 1
-        df_unc = pd.DataFrame({"W1": T_vals[unc_mask]})
-        w_unc = weights[unc_mask]
-        
-        init_est = RightCensoredInitEstimator(
-            tol=EM_DEFAULTS.tol,
-            norm_constraint=self.base_norm_constraint,
-            n_grid_points=self.n_grid_points,
-            basis_order=self.basis_order,
-            solver=self.solver,
-            use_secondary_solver=self.use_secondary_solver,
-        ).fit(df_unc, sample_weights=w_unc)
-        
-        # Run EM
-        m_step_norm_constraint = self.base_norm_constraint * m_step_norm_multiplier
-        
-        def s_c_predict(t: np.ndarray) -> np.ndarray:
-            return np.atleast_1d(km.predict(t))
-        
-        em_stage = RightCensoredEMStage(
-            m_imputations=self.em_m_imputations,
-            max_em_iter=min(10, self.em_max_em_iter),  # Fewer iterations for CV
-            em_tol=self.em_tol,
-            norm_constraint=m_step_norm_constraint,
-            n_grid_points=self.n_grid_points,
-            use_sc_adjustment=self.em_use_sc_adjustment,
-            e_step_n_grid=self.em_e_step_n_grid,
-            tol=EM_DEFAULTS.tol,
-            m_step_solver=self.solver,
-            verbose=False,
-            rng_seed=self.random_state,
-        )
-        
-        em_result = em_stage.run(
-            initial_estimator=init_est,
-            data=train_df,
-            S_c_predict=s_c_predict,
-        )
-        
-        return incomplete_loglik(em_result.final_estimator, val_df, time_col="T", delta_col="Delta")
 
 
 class RightCensoredJointTuner:
@@ -377,7 +320,6 @@ class RightCensoredJointTuner:
             n_grid_points=self.n_grid_points,
             do_over_smooth=self.do_over_smooth,
             oversmooth_factors=self.oversmooth_factors,
-            cv_folds=self.cv_folds,
             em_m_imputations=self.em_m_imputations,
             em_max_em_iter=self.em_max_em_iter,
             silent=self.silent,

@@ -61,3 +61,6 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
+markers = [
+    "slow_notebook_parity: slower notebook-style parity checks for censored-data workflows",
+]

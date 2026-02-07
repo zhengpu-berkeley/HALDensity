@@ -21,7 +21,7 @@ This module provides HAL-based density estimation for censored data:
 | Tuner | Description |
 |-------|-------------|
 | `RightCensoredInitTuner` | Stage 1 tuner (Optuna CV) |
-| `RightCensoredEMTuner` | Stage 2 tuner (oversmooth or CV mode) |
+| `RightCensoredEMTuner` | Stage 2 tuner (oversmooth or direct no-oversmooth mode) |
 | `RightCensoredJointTuner` | Convenience wrapper (Stage 1 + Stage 2) |
 | `IntervalCensoredInitTuner` | Stage 1 tuner for interval-censored data |
 | `IntervalCensoredEMTuner` | Stage 2 tuner for interval-censored data |
