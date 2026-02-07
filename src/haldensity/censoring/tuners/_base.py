@@ -11,6 +11,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Dict, NamedTuple, Optional, Tuple
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -317,7 +318,7 @@ class BaseCensoredEMTuner(ABC):
     
     Supports two modes via `do_over_smooth`:
     - True (default): Grid search over oversmooth factors + EM refinement
-    - False: CV-based tuning of m_step_norm_multiplier
+    - False: Direct EM refinement from the provided Stage 1 estimator
     
     Parameters
     ----------
@@ -330,11 +331,9 @@ class BaseCensoredEMTuner(ABC):
     n_grid_points : int
         Number of grid points for density evaluation.
     do_over_smooth : bool
-        If True, use oversmooth grid search. If False, use CV tuning.
+        If True, use oversmooth grid search. If False, run direct no-oversmooth EM.
     oversmooth_factors : Iterable[float] | None
         Factors for oversmooth grid (used when do_over_smooth=True).
-    cv_folds : int
-        Number of CV folds (used when do_over_smooth=False).
     em_m_imputations : int
         Number of imputations for EM E-step.
     em_max_em_iter : int
@@ -361,7 +360,6 @@ class BaseCensoredEMTuner(ABC):
         n_grid_points: int = TUNER_DEFAULTS.n_grid_points,
         do_over_smooth: bool = True,
         oversmooth_factors: Optional[list[float]] = None,
-        cv_folds: int = TUNER_DEFAULTS.cv_folds,
         em_m_imputations: int = EM_DEFAULTS.m_imputations,
         em_max_em_iter: int = 20,
         em_tol: float = EM_DEFAULTS.em_tol,
@@ -378,7 +376,6 @@ class BaseCensoredEMTuner(ABC):
         self.random_state = int(random_state)
         self.n_grid_points = int(n_grid_points)
         self.do_over_smooth = bool(do_over_smooth)
-        self.cv_folds = int(cv_folds)
         self.silent = bool(silent)
         
         # Extract parameters from Stage 1 estimator
@@ -426,9 +423,6 @@ class BaseCensoredEMTuner(ABC):
         self.em_records: Optional[list[OverSmoothEMRecord]] = None
         self.best_em_record: Optional[OverSmoothEMRecord] = None
         self.best_params: Optional[Dict[str, Any]] = None
-        
-        # For CV mode
-        self.study: Optional[optuna.Study] = None
     
     @abstractmethod
     def _fit_init_estimator(self, norm_constraint: float) -> Any:
@@ -449,16 +443,6 @@ class BaseCensoredEMTuner(ABC):
         """Run EM stage and return the EM result."""
         pass
     
-    @abstractmethod
-    def _evaluate_cv_fold(
-        self,
-        train_df: pd.DataFrame,
-        val_df: pd.DataFrame,
-        m_step_norm_multiplier: float,
-    ) -> float:
-        """Evaluate m_step_norm_multiplier on a CV fold (for do_over_smooth=False)."""
-        pass
-    
     def _fit_oversmooth_grid(self) -> list[OverSmoothInitRecord]:
         """Fit init estimators for all oversmooth factors."""
         factors = sorted(set(self.oversmooth_factors + [1.0]))
@@ -466,7 +450,10 @@ class BaseCensoredEMTuner(ABC):
         
         for factor in factors:
             nc = self.base_norm_constraint * factor
-            est = self._fit_init_estimator(nc)
+            if np.isclose(float(factor), 1.0):
+                est = self.stage1_estimator
+            else:
+                est = self._fit_init_estimator(nc)
             res = est.get_results()
             n_knots = len(res.get("grid_points_hal_selected", []))
             ll = self._compute_loglik(est)
@@ -583,69 +570,62 @@ class BaseCensoredEMTuner(ABC):
             best_params=self.best_params,
             metadata=metadata,
         )
-    
-    def _tune_with_cv(self) -> TuningResult:
-        """Run CV-based tuning of m_step_norm_multiplier."""
-        from tqdm import tqdm
-        
-        kfold = KFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state)
-        
-        def evaluate(m_step_norm_multiplier: float) -> float:
-            scores = []
-            for fold_idx, (train_idx, val_idx) in enumerate(kfold.split(self.data)):
-                train_df = self.data.iloc[train_idx].reset_index(drop=True)
-                val_df = self.data.iloc[val_idx].reset_index(drop=True)
-                try:
-                    score = self._evaluate_cv_fold(train_df, val_df, m_step_norm_multiplier)
-                    scores.append(score)
-                except Exception:
-                    scores.append(float("-inf"))
-            mean_score = float(np.mean(scores))
-            return -mean_score if np.isfinite(mean_score) else float("inf")
-        
-        def objective(trial: optuna.Trial) -> float:
-            mult = trial.suggest_float("m_step_norm_multiplier", 0.5, 1.0, log=True)
-            return evaluate(mult)
-        
-        self.study = optuna.create_study(direction="minimize")
-        
-        if not self.silent:
-            progress = tqdm(total=20, desc="EM Tuner CV", unit="trial")
-            best_metric = {"value": float("-inf")}
-            
-            def update_progress(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
-                trial_val = trial.value if trial.value is not None else float("inf")
-                metric = -float(trial_val) if np.isfinite(trial_val) else float("-inf")
-                if metric > best_metric["value"]:
-                    best_metric["value"] = metric
-                progress.update(1)
-                mult = trial.params.get("m_step_norm_multiplier", "?")
-                mult_str = f"{mult:.2f}" if isinstance(mult, float) else str(mult)
-                progress.set_postfix({"LL": f"{metric:.2f}", "mult": mult_str})
-            
-            try:
-                self.study.optimize(objective, n_trials=20, show_progress_bar=False, callbacks=[update_progress])
-            finally:
-                progress.close()
-        else:
-            self.study.optimize(objective, n_trials=20, show_progress_bar=False)
-        
-        best_mult = self.study.best_params["m_step_norm_multiplier"]
-        m_step_norm_constraint = self.base_norm_constraint * best_mult
-        
-        # Fit final model
+
+    def _tune_without_oversmooth(self) -> TuningResult:
+        """Run direct no-oversmooth EM refinement from Stage 1."""
+        if not np.isclose(self.em_norm_factor, 1.0):
+            warnings.warn(
+                "do_over_smooth=False uses Stage 2A semantics (no oversmooth). "
+                f"Received em_norm_factor={self.em_norm_factor:.6g} (expected 1.0 for strict baseline).",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        base_res = self.stage1_estimator.get_results()
+        base_knots = len(base_res.get("grid_points_hal_selected", []))
+        base_ll = self._compute_loglik(self.stage1_estimator)
+        base_record = OverSmoothInitRecord(
+            factor=1.0,
+            norm_constraint=float(self.base_norm_constraint),
+            estimator=self.stage1_estimator,
+            n_knots=int(base_knots),
+            log_likelihood=float(base_ll),
+        )
+
+        m_step_norm_constraint = self.em_norm_factor * self.base_norm_constraint
         em_result = self._run_em_stage(self.stage1_estimator, m_step_norm_constraint)
-        
-        self.best_params = {"m_step_norm_multiplier": best_mult}
-        
-        metadata = {
-            "study": self.study,
-            "best_metric_value": -self.study.best_value,
-            "mode": "cv",
+        em_est = em_result.final_estimator
+        em_ll = self._compute_loglik(em_est)
+        em_knots = len(em_est.get_results().get("grid_points_hal_selected", []))
+        em_record = OverSmoothEMRecord(
+            factor=1.0,
+            init_n_knots=int(base_record.n_knots),
+            init_ll=float(base_record.log_likelihood),
+            em_iterations=int(em_result.em_iterations),
+            em_converged=bool(em_result.em_converged),
+            em_n_knots=int(em_knots),
+            em_ll=float(em_ll),
+            ll_gain=float(em_ll - base_record.log_likelihood),
+            em_estimator=em_est,
+        )
+
+        self.init_records = [base_record]
+        self.selected_factors = [1.0]
+        self.em_records = [em_record]
+        self.best_em_record = em_record
+        self.best_params = {
+            "oversmooth_factor": 1.0,
+            "em_norm_factor": self.em_norm_factor,
         }
-        
+        metadata = {
+            "init_records": self.init_records,
+            "selected_factors": self.selected_factors,
+            "em_records": self.em_records,
+            "best_em_record": self.best_em_record,
+            "mode": "no_oversmooth",
+        }
         return TuningResult(
-            estimator=em_result.final_estimator,
+            estimator=em_est,
             best_params=self.best_params,
             metadata=metadata,
         )
@@ -661,4 +641,4 @@ class BaseCensoredEMTuner(ABC):
         if self.do_over_smooth:
             return self._tune_with_oversmooth()
         else:
-            return self._tune_with_cv()
+            return self._tune_without_oversmooth()
