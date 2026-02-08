@@ -150,7 +150,10 @@ class WeightedHALMLEEstimator(BaseEstimator):
             raise ValueError("Sum of weights must be positive")
 
         # Set up grid points for basis
-        if grid_points_override is not None and len(grid_points_override) > 0:
+        # IMPORTANT: if grid_points_override is provided (even if empty), respect it.
+        # This allows "parametric-only" fits (e.g., {1, x, x^2, ...} with no knot terms),
+        # which is required for EM edge cases where no knots are selected at initialization.
+        if grid_points_override is not None:
             grid_points_hal = np.sort(np.unique(np.asarray(grid_points_override, dtype=float)))
         else:
             grid_points_hal = np.unique(
