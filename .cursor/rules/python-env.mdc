@@ -1,0 +1,5 @@
+---
+alwaysApply: true
+---
+
+This repository uses UV As our package manager. Use `uv run` to run any python script and python code. Use `uv pip install .` to reflect any potentially all incorporated code change in `src` if there are problems.

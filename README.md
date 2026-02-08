@@ -11,6 +11,9 @@ Features
 - Cross-validation and hyperparameter tuning via Optuna
 - Delta-method style density bands; bootstrap example included
 - Targeted learning (TMLE) for survival, mean, and median
+- **Censored data support**:
+  - Right-censored density estimation via IPCW initialization, EM + MI, and censoring-aware Optuna tuning
+  - Interval-censored density estimation via midpoint initialization and EM refinement
 
 Install
 This repo uses Python 3.11+. With uv:
@@ -147,30 +150,34 @@ se = np.sqrt(var)[0]  # single scalar
 
 Notes
 
-- The example notebook `examples/example_target_learning.ipynb` demonstrates all four targets. Set `TARGET_TYPE` to one of "CDF", "Survival", "Moments", or "Median" to switch modes.
+- The example notebook `examples/example_full_data_target_learning.ipynb` demonstrates all four targets. Set `TARGET_TYPE` to one of "CDF", "Survival", "Moments", or "Median" to switch modes.
 - For CDF/Survival, provide `targeting_points` where the functional is targeted and where standard errors are reported.
 - For Moments, provide `x_moment` (integer power).
 - For Median, no additional arguments are needed beyond `old_theta` and the selected HAL grid.
 
 Examples
 
-- `examples/example_density_estimator.ipynb`: quick demo of estimators
-- `examples/example_target_learning.ipynb`: targeting examples
-- `examples/example_case_study.ipynb`: real-data galaxy velocity case study
+- `examples/example_full_data_density_estimator.ipynb`: quick demo of estimators on fully observed data
+- `examples/example_full_data_target_learning.ipynb`: targeting examples (TMLE for CDF, survival, moments, median)
+- `examples/example_full_data_case_study.ipynb`: real-data galaxy velocity case study
+- `examples/example_right_censored_density_estimator.ipynb`: right-censored density estimation workflow (IPCW + EM)
+- `examples/example_interval_censored_density_estimator.ipynb`: interval-censored density estimation workflow
 
 Repository Structure
 
 ```
-
 src/haldensity/
-estimation/ # Estimators and base class
-cross_validation/ # Optuna tuner and lambda selector
-targeting/ # TMLE learners for survival/mean/median
-density_variance/ # Variance/band utilities
-utils/ # Basis construction + math utilities
-examples/ # Notebooks and plotting helpers
-local/setups/ # JSON configs for reproducible runs
-
+  estimation/        # Estimators and base class
+  cross_validation/  # Optuna tuner and lambda selector
+  targeting/         # TMLE learners for survival/mean/median
+  density_variance/  # Variance/band utilities
+  censoring/         # Censored data estimation
+    right/           # Right-censoring: IPCW, KM, EM
+    interval/        # Interval-censoring: midpoint init, EM
+    tuners/          # Optuna tuners for censored data
+    utils/           # Shared metrics (KL divergence, etc.)
+  utils/             # Basis construction + math utilities
+examples/            # Notebooks and plotting helpers
 ```
 
 License
