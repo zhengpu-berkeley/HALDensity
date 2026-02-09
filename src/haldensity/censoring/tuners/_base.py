@@ -87,7 +87,13 @@ class BaseCensoredInitTuner(ABC):
     conservative_max_steps : int
         Maximum steps for conservative search.
     conservative_step_pct : float
-        Step size as percentage of best value.
+        Step size as percentage of best value (linear) or relative tolerance (bisection).
+    conservative_method : str
+        Conservative search method: {"bisection", "linear"}.
+    conservative_bracket_factor : float
+        Geometric shrink factor (0, 1) used to bracket the threshold in bisection mode.
+    conservative_min_norm_constraint : float
+        Minimum norm_constraint considered during conservative search.
     silent : bool
         Whether to suppress progress output.
     """
@@ -103,6 +109,9 @@ class BaseCensoredInitTuner(ABC):
         conservative_k_percent: float = TUNER_DEFAULTS.conservative_k_percent,
         conservative_max_steps: int = TUNER_DEFAULTS.conservative_max_steps,
         conservative_step_pct: float = TUNER_DEFAULTS.conservative_step_pct,
+        conservative_method: str = TUNER_DEFAULTS.conservative_method,
+        conservative_bracket_factor: float = TUNER_DEFAULTS.conservative_bracket_factor,
+        conservative_min_norm_constraint: float = TUNER_DEFAULTS.conservative_min_norm_constraint,
         silent: bool = True,
     ):
         self.data = data.reset_index(drop=True)
@@ -116,6 +125,16 @@ class BaseCensoredInitTuner(ABC):
         self.conservative_k_percent = float(conservative_k_percent)
         self.conservative_max_steps = int(conservative_max_steps)
         self.conservative_step_pct = float(conservative_step_pct)
+        self.conservative_method = str(conservative_method)
+        self.conservative_bracket_factor = float(conservative_bracket_factor)
+        self.conservative_min_norm_constraint = float(conservative_min_norm_constraint)
+        
+        if self.conservative_method not in ("bisection", "linear"):
+            raise ValueError("conservative_method must be one of {'bisection', 'linear'}")
+        if not (0.0 < self.conservative_bracket_factor < 1.0):
+            raise ValueError("conservative_bracket_factor must be in (0, 1)")
+        if not (0.0 < self.conservative_min_norm_constraint):
+            raise ValueError("conservative_min_norm_constraint must be > 0")
         
         self.kfold = KFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state)
         optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -188,7 +207,20 @@ class BaseCensoredInitTuner(ABC):
         return mean_score, sd_score, fold_scores
     
     def _apply_conservative_adjustment(self) -> Dict[str, Any]:
-        """Apply conservative 1-SE adjustment to reduce oversmoothing."""
+        """Apply conservative threshold adjustment after Optuna CV.
+        
+        Goal (same across methods):
+        find the smallest `norm_constraint` such that:
+            CV_LL(norm_constraint) >= CV_LL(optuna_best) - k% * SD(optuna_best)
+        
+        Notes
+        -----
+        - This is a *post-processing* step that keeps `basis_order` fixed and
+          only adjusts `norm_constraint`.
+        - In practice CV_LL vs norm_constraint is not perfectly monotone due to
+          numerical noise and solver failures; implementations keep track of
+          the smallest value observed above threshold and fall back gracefully.
+        """
         if self.optuna_params is None:
             raise ValueError("Optuna optimization must run first")
         
@@ -196,31 +228,74 @@ class BaseCensoredInitTuner(ABC):
         basis_order = int(self.optuna_params["basis_order"])
         
         optuna_cv_ll, optuna_cv_sd, _ = self._compute_cv_score_with_sd(optuna_nc, basis_order)
-        threshold = optuna_cv_ll - self.conservative_k_percent * optuna_cv_sd
+        if not np.isfinite(optuna_cv_ll):
+            # If the "best" point is not evaluable, do not attempt adjustment.
+            self.adjustment_results = [{
+                "step": 0,
+                "norm_constraint": float(optuna_nc),
+                "cv_ll": float(optuna_cv_ll),
+                "cv_sd": float(optuna_cv_sd),
+                "above_threshold": True,
+                "method": self.conservative_method,
+                "note": "optuna_cv_ll_nonfinite_no_adjustment",
+            }]
+            self.conservative_params = {"norm_constraint": float(optuna_nc), "basis_order": int(basis_order)}
+            return self.conservative_params
         
+        threshold = float(optuna_cv_ll - self.conservative_k_percent * optuna_cv_sd)
+        
+        if self.conservative_method == "linear":
+            return self._apply_conservative_adjustment_linear(
+                optuna_nc=optuna_nc,
+                basis_order=basis_order,
+                optuna_cv_ll=float(optuna_cv_ll),
+                optuna_cv_sd=float(optuna_cv_sd),
+                threshold=threshold,
+            )
+        return self._apply_conservative_adjustment_bisection(
+            optuna_nc=optuna_nc,
+            basis_order=basis_order,
+            optuna_cv_ll=float(optuna_cv_ll),
+            optuna_cv_sd=float(optuna_cv_sd),
+            threshold=threshold,
+        )
+    
+    def _apply_conservative_adjustment_linear(
+        self,
+        optuna_nc: float,
+        basis_order: int,
+        optuna_cv_ll: float,
+        optuna_cv_sd: float,
+        threshold: float,
+    ) -> Dict[str, Any]:
+        """Legacy linear stepping: nc = optuna_nc - step * (pct * optuna_nc)."""
         step_size = self.conservative_step_pct * optuna_nc
         best_conservative_nc = optuna_nc
         
         self.adjustment_results = [{
             "step": 0,
-            "norm_constraint": optuna_nc,
-            "cv_ll": optuna_cv_ll,
-            "cv_sd": optuna_cv_sd,
+            "norm_constraint": float(optuna_nc),
+            "cv_ll": float(optuna_cv_ll),
+            "cv_sd": float(optuna_cv_sd),
             "above_threshold": True,
+            "method": "linear",
+            "threshold": float(threshold),
         }]
         
         for step in range(1, self.conservative_max_steps + 1):
             candidate_nc = optuna_nc - step * step_size
-            if candidate_nc <= 0:
+            if candidate_nc <= self.conservative_min_norm_constraint:
                 break
             cand_cv_ll, cand_cv_sd, _ = self._compute_cv_score_with_sd(candidate_nc, basis_order)
-            above_threshold = cand_cv_ll >= threshold
+            above_threshold = bool(cand_cv_ll >= threshold)
             self.adjustment_results.append({
-                "step": step,
-                "norm_constraint": candidate_nc,
-                "cv_ll": cand_cv_ll,
-                "cv_sd": cand_cv_sd,
+                "step": int(step),
+                "norm_constraint": float(candidate_nc),
+                "cv_ll": float(cand_cv_ll),
+                "cv_sd": float(cand_cv_sd),
                 "above_threshold": above_threshold,
+                "method": "linear",
+                "threshold": float(threshold),
             })
             if above_threshold:
                 best_conservative_nc = candidate_nc
@@ -231,6 +306,105 @@ class BaseCensoredInitTuner(ABC):
             "norm_constraint": float(best_conservative_nc),
             "basis_order": int(basis_order),
         }
+        return self.conservative_params
+    
+    def _apply_conservative_adjustment_bisection(
+        self,
+        optuna_nc: float,
+        basis_order: int,
+        optuna_cv_ll: float,
+        optuna_cv_sd: float,
+        threshold: float,
+    ) -> Dict[str, Any]:
+        """Bracket + log-bisection to find smallest nc with CV_LL >= threshold.
+        
+        Uses geometric bracketing to rapidly move away from extremely large
+        Optuna-selected constraints (common with highly correlated bases).
+        """
+        # Cache within this adjustment call (avoid duplicate CV runs).
+        cache: dict[float, tuple[float, float]] = {}
+        
+        def _key(nc: float) -> float:
+            # Stable-ish key: round to mitigate float noise but preserve scale.
+            return float(np.round(float(nc), 12))
+        
+        def eval_nc(nc: float, step: int) -> tuple[float, float, bool]:
+            nc = float(max(nc, self.conservative_min_norm_constraint))
+            k = _key(nc)
+            if k in cache:
+                mean_ll, sd_ll = cache[k]
+            else:
+                mean_ll, sd_ll, _ = self._compute_cv_score_with_sd(nc, basis_order)
+                mean_ll, sd_ll = float(mean_ll), float(sd_ll)
+                cache[k] = (mean_ll, sd_ll)
+            
+            above = bool(mean_ll >= threshold)
+            self.adjustment_results.append({
+                "step": int(step),
+                "norm_constraint": float(nc),
+                "cv_ll": float(mean_ll),
+                "cv_sd": float(sd_ll),
+                "above_threshold": above,
+                "method": "bisection",
+                "threshold": float(threshold),
+            })
+            return mean_ll, sd_ll, above
+        
+        self.adjustment_results = []
+        
+        # Step 0: Optuna best point (known above threshold by construction).
+        step = 0
+        eval_nc(optuna_nc, step=step)
+        step += 1
+        
+        # Bracket: shrink geometrically until we cross below threshold or hit min.
+        best_good_nc = float(optuna_nc)
+        bad_nc: Optional[float] = None
+        
+        while step <= self.conservative_max_steps:
+            cand = best_good_nc * self.conservative_bracket_factor
+            if cand <= self.conservative_min_norm_constraint:
+                best_good_nc = float(self.conservative_min_norm_constraint)
+                break
+            _, _, above = eval_nc(cand, step=step)
+            step += 1
+            if above:
+                best_good_nc = float(cand)
+                continue
+            bad_nc = float(cand)
+            break
+        
+        # If we never found a "bad" point, we already have the smallest good we reached.
+        if bad_nc is None:
+            self.conservative_params = {"norm_constraint": float(best_good_nc), "basis_order": int(basis_order)}
+            return self.conservative_params
+        
+        # Bisection in log-space between (bad_nc < good_nc).
+        good_nc = float(best_good_nc)
+        bad_nc = float(bad_nc)
+        
+        # Stop when interval is tight enough in relative terms.
+        rel_tol = float(max(self.conservative_step_pct, 1e-6))
+        
+        while step <= self.conservative_max_steps:
+            if good_nc <= self.conservative_min_norm_constraint:
+                good_nc = float(self.conservative_min_norm_constraint)
+                break
+            
+            # Relative gap: (good - bad)/good, note bad < good.
+            gap = (good_nc - bad_nc) / max(good_nc, self.conservative_min_norm_constraint)
+            if gap <= rel_tol:
+                break
+            
+            mid = float(np.exp((np.log(bad_nc) + np.log(good_nc)) / 2.0))
+            _, _, above = eval_nc(mid, step=step)
+            step += 1
+            if above:
+                good_nc = float(mid)  # move left (smaller) while staying above
+            else:
+                bad_nc = float(mid)   # move right (larger) to regain above
+        
+        self.conservative_params = {"norm_constraint": float(good_nc), "basis_order": int(basis_order)}
         return self.conservative_params
     
     def _objective(self, trial: optuna.Trial) -> float:

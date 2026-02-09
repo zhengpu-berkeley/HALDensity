@@ -52,6 +52,9 @@ class TunerDefaults(BaseModel):
     conservative_k_percent: float = 0.05  # 5% of SD as threshold
     conservative_max_steps: int = 50  # Maximum search steps
     conservative_step_pct: float = 0.02  # 2% step size per step
+    conservative_method: str = "bisection"  # {"bisection", "linear"}
+    conservative_bracket_factor: float = 0.5  # geometric shrink factor during bracketing
+    conservative_min_norm_constraint: float = 1e-6  # floor to avoid invalid/zero constraints
 
 
 # Default instances for convenience
