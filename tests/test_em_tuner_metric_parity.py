@@ -10,6 +10,7 @@ from haldensity.censoring import (
     RightCensoredInitEstimator,
     compute_ipcw_weights,
     incomplete_loglik_interval,
+    interval_censor_inspection_uniform,
     kl_divergence,
 )
 from haldensity.utils import TruncatedGMM
@@ -40,14 +41,8 @@ def _make_interval_censored_data(n: int = 260, seed: int = 42) -> tuple[pd.DataF
     np.random.seed(seed)
     sampler = _make_sampler()
     t_event = sampler.generate_samples(n)
-    widths = np.random.uniform(0.05, 0.15, size=n)
-    left_shift = np.random.uniform(0.0, 1.0, size=n) * widths
-
-    left = np.clip(t_event - left_shift, 0.0, 1.0)
-    right = np.clip(left + widths, 0.0, 1.0)
-    right = np.maximum(right, left + 0.01)
-    right = np.minimum(right, 1.0)
-    return pd.DataFrame({"L": left, "R": right}), sampler
+    data = interval_censor_inspection_uniform(t_event, n_inspections=8, random_state=seed)
+    return data, sampler
 
 
 def _fit_stage1_right(data: pd.DataFrame) -> RightCensoredInitEstimator:

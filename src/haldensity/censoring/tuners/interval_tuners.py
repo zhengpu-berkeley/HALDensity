@@ -22,6 +22,7 @@ from haldensity.censoring.interval.metrics import incomplete_loglik_interval
 from ._base import (
     BaseCensoredInitTuner,
     BaseCensoredEMTuner,
+    BaseCVOversmoothEMTuner,
     TuningResult,
 )
 
@@ -371,3 +372,130 @@ class IntervalCensoredJointTuner:
         self.stage2_result = em_tuner.optimize()
         
         return (self.stage1_result, self.stage2_result)
+
+
+class IntervalCensoredCVOversmoothEMTuner(BaseCVOversmoothEMTuner):
+    """CV-based oversmooth EM tuner for interval-censored data.
+
+    Performs K-fold cross-validation with Optuna over
+    ``(oversmooth_factor, em_norm_factor)`` to select the combination that
+    maximises held-out incomplete-data log-likelihood, then refits with the
+    winner on the full dataset.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Data with columns ``L_col`` and ``R_col``.
+    stage1_estimator : Any
+        Fitted Stage 1 estimator.
+    cv_folds : int
+        Number of CV folds.
+    random_state : int
+        Random seed.
+    n_grid_points : int
+        Number of grid points.
+    oversmooth_factors : list[float] | None
+        Range specification for oversmooth factor. If one value, fixed; if
+        multiple, min/max define search range. Default [0.1, 1.0].
+    em_norm_factors : list[float] | None
+        Range specification for EM norm factor. If one value, fixed; if
+        multiple, min/max define search range. Default [1.0, 5.0].
+    em_m_imputations : int
+        Imputations for EM E-step.
+    em_max_em_iter : int
+        Max EM iterations.
+    em_tol : float
+        EM convergence tolerance.
+    em_e_step_n_grid : int
+        Grid size for E-step inverse CDF.
+    silent : bool
+        Suppress output.
+    solver : str | None
+        Solver to use.
+    use_secondary_solver : bool | None
+        Whether to use secondary solver.
+    L_col : str
+        Left interval column name.
+    R_col : str
+        Right interval column name.
+    """
+
+    def __init__(
+        self,
+        data: pd.DataFrame,
+        stage1_estimator: Any,
+        cv_folds: int = TUNER_DEFAULTS.cv_folds,
+        random_state: int = TUNER_DEFAULTS.random_state,
+        n_grid_points: int = TUNER_DEFAULTS.n_grid_points,
+        oversmooth_factors: Optional[list[float]] = None,
+        em_norm_factors: Optional[list[float]] = None,
+        em_m_imputations: int = EM_DEFAULTS.m_imputations,
+        em_max_em_iter: int = 20,
+        em_tol: float = EM_DEFAULTS.em_tol,
+        em_e_step_n_grid: int = EM_DEFAULTS.e_step_n_grid,
+        silent: bool = True,
+        solver: Optional[str] = None,
+        use_secondary_solver: Optional[bool] = None,
+        L_col: str = "L",
+        R_col: str = "R",
+    ):
+        super().__init__(
+            data=data,
+            stage1_estimator=stage1_estimator,
+            cv_folds=cv_folds,
+            random_state=random_state,
+            n_grid_points=n_grid_points,
+            oversmooth_factors=oversmooth_factors,
+            em_norm_factors=em_norm_factors,
+            em_m_imputations=em_m_imputations,
+            em_max_em_iter=em_max_em_iter,
+            em_tol=em_tol,
+            em_e_step_n_grid=em_e_step_n_grid,
+            silent=silent,
+            solver=solver,
+            use_secondary_solver=use_secondary_solver,
+        )
+        self.L_col = str(L_col)
+        self.R_col = str(R_col)
+
+    def _fit_init_estimator_on_data(
+        self, data: pd.DataFrame, norm_constraint: float,
+    ) -> IntervalCensoredInitEstimator:
+        return IntervalCensoredInitEstimator(
+            tol=EM_DEFAULTS.tol,
+            norm_constraint=norm_constraint,
+            n_grid_points=self.n_grid_points,
+            basis_order=self.basis_order,
+            solver=self.solver,
+            use_secondary_solver=self.use_secondary_solver,
+            include_intercept_in_constraint=False,
+        ).fit(data, L_col=self.L_col, R_col=self.R_col)
+
+    def _run_em_stage_on_data(
+        self,
+        initial_estimator: Any,
+        data: pd.DataFrame,
+        m_step_norm_constraint: float,
+    ) -> Any:
+        em_stage = IntervalCensoredEMStage(
+            m_imputations=self.em_m_imputations,
+            max_em_iter=self.em_max_em_iter,
+            em_tol=self.em_tol,
+            norm_constraint=m_step_norm_constraint,
+            n_grid_points=self.n_grid_points,
+            e_step_n_grid=self.em_e_step_n_grid,
+            tol=EM_DEFAULTS.tol,
+            m_step_solver=self.solver,
+            verbose=False,
+            rng_seed=self.random_state,
+            L_col=self.L_col,
+            R_col=self.R_col,
+        )
+        return em_stage.run(initial_estimator=initial_estimator, data=data)
+
+    def _compute_loglik_on_data(
+        self, estimator: Any, data: pd.DataFrame,
+    ) -> float:
+        return incomplete_loglik_interval(
+            estimator, data, L_col=self.L_col, R_col=self.R_col,
+        )

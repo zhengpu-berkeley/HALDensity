@@ -25,6 +25,7 @@ from haldensity.censoring.right.metrics import incomplete_loglik
 from ._base import (
     BaseCensoredInitTuner,
     BaseCensoredEMTuner,
+    BaseCVOversmoothEMTuner,
     TuningResult,
 )
 
@@ -327,3 +328,70 @@ class RightCensoredJointTuner:
         self.stage2_result = em_tuner.optimize()
         
         return (self.stage1_result, self.stage2_result)
+
+
+class RightCensoredCVOversmoothEMTuner(BaseCVOversmoothEMTuner):
+    """CV-based oversmooth EM tuner for right-censored data.
+
+    Performs K-fold cross-validation with Optuna over
+    ``(oversmooth_factor, em_norm_factor)`` to select the combination that
+    maximizes held-out incomplete-data log-likelihood, then refits with the
+    winner on the full dataset.
+    """
+
+    def _fit_init_estimator_on_data(
+        self, data: pd.DataFrame, norm_constraint: float,
+    ) -> RightCensoredInitEstimator:
+        km = KaplanMeier().fit(data, time_col="T", delta_col="Delta")
+
+        t_vals = np.asarray(data["T"].values, dtype=float)
+        delta_vals = np.asarray(data["Delta"].values, dtype=int)
+        weights = compute_ipcw_weights(t_vals, delta_vals, lambda t: np.atleast_1d(km.predict(t)))
+
+        unc_mask = delta_vals == 1
+        df_unc = pd.DataFrame({"W1": t_vals[unc_mask]})
+        w_unc = weights[unc_mask]
+
+        return RightCensoredInitEstimator(
+            tol=EM_DEFAULTS.tol,
+            norm_constraint=norm_constraint,
+            n_grid_points=self.n_grid_points,
+            basis_order=self.basis_order,
+            solver=self.solver,
+            use_secondary_solver=self.use_secondary_solver,
+        ).fit(df_unc, sample_weights=w_unc)
+
+    def _run_em_stage_on_data(
+        self,
+        initial_estimator: Any,
+        data: pd.DataFrame,
+        m_step_norm_constraint: float,
+    ) -> Any:
+        km = KaplanMeier().fit(data, time_col="T", delta_col="Delta")
+
+        def s_c_predict(t: np.ndarray) -> np.ndarray:
+            return np.atleast_1d(km.predict(t))
+
+        em_stage = RightCensoredEMStage(
+            m_imputations=self.em_m_imputations,
+            max_em_iter=self.em_max_em_iter,
+            em_tol=self.em_tol,
+            norm_constraint=m_step_norm_constraint,
+            n_grid_points=self.n_grid_points,
+            use_sc_adjustment=self.em_use_sc_adjustment,
+            e_step_n_grid=self.em_e_step_n_grid,
+            tol=EM_DEFAULTS.tol,
+            m_step_solver=self.solver,
+            verbose=False,
+            rng_seed=self.random_state,
+        )
+        return em_stage.run(
+            initial_estimator=initial_estimator,
+            data=data,
+            S_c_predict=s_c_predict,
+        )
+
+    def _compute_loglik_on_data(
+        self, estimator: Any, data: pd.DataFrame,
+    ) -> float:
+        return incomplete_loglik(estimator, data, time_col="T", delta_col="Delta")

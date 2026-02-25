@@ -51,6 +51,10 @@ from .interval import (
     IntervalCensoredEMEstimator,
     IntervalCensoredEMStage,
     incomplete_loglik_interval,
+    interval_censor,
+    interval_censor_current_status_uniform,
+    interval_censor_inspection_uniform,
+    interval_censor_width_uniform,
 )
 
 # Core models and defaults
@@ -65,9 +69,11 @@ from .tuners import (
     RightCensoredInitTuner,
     RightCensoredEMTuner,
     RightCensoredJointTuner,
+    RightCensoredCVOversmoothEMTuner,
     IntervalCensoredInitTuner,
     IntervalCensoredEMTuner,
     IntervalCensoredJointTuner,
+    IntervalCensoredCVOversmoothEMTuner,
 )
 
 # Shared utilities
@@ -83,6 +89,10 @@ __all__ = [
     # Utilities
     "KaplanMeier",
     "compute_ipcw_weights",
+    "interval_censor",
+    "interval_censor_inspection_uniform",
+    "interval_censor_current_status_uniform",
+    "interval_censor_width_uniform",
     # Metrics
     "incomplete_loglik",
     "incomplete_loglik_interval",
@@ -105,10 +115,12 @@ __all__ = [
     "RightCensoredInitTuner",
     "RightCensoredEMTuner",
     "RightCensoredJointTuner",
+    "RightCensoredCVOversmoothEMTuner",
     # Interval-censored tuners
     "IntervalCensoredInitTuner",
     "IntervalCensoredEMTuner",
     "IntervalCensoredJointTuner",
+    "IntervalCensoredCVOversmoothEMTuner",
     # Submodules
     "right",
     "interval",

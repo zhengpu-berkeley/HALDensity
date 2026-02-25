@@ -278,8 +278,18 @@ class WeightedHALMLEEstimator(BaseEstimator):
             else:
                 self.grid_points_hal_selected = np.array([])
 
-        # Compute normalized density
-        output_grid = np.linspace(0.0, 1.0, self.n_grid_points)
+        # Compute normalized density on an evaluation grid.
+        #
+        # For order=0 (step-function HAL), the fitted log-density can have many
+        # sharp jumps if knot locations are clustered. A coarse evaluation grid
+        # can miss these jumps, producing densities that appear normalized on the
+        # coarse grid but integrate to >1 when evaluated on a finer grid.
+        #
+        # Mitigation: use a sufficiently dense uniform grid for order=0 when
+        # constructing the normalization constants used by get_density_at_points().
+        n_out = int(max(self.n_grid_points, 2000)) if self.basis_order == 0 else int(self.n_grid_points)
+        output_grid = np.linspace(0.0, 1.0, n_out)
+
         output_grid_mid = (output_grid[:-1] + output_grid[1:]) / 2
         delta_out = output_grid[1:] - output_grid[:-1]
 
@@ -288,6 +298,7 @@ class WeightedHALMLEEstimator(BaseEstimator):
             self.theta_hat,
             grid_points_hal,
             self.basis_order,
+            delta=delta_out,
         )
         self._norm_shift = max_log
         self._norm_Z = norm_const

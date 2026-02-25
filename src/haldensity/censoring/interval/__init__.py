@@ -9,6 +9,12 @@ from .estimators import (
     IntervalCensoredEMStage,
 )
 from .metrics import incomplete_loglik_interval
+from .simulate import (
+    interval_censor,
+    interval_censor_current_status_uniform,
+    interval_censor_inspection_uniform,
+    interval_censor_width_uniform,
+)
 
 __all__ = [
     # Estimators
@@ -17,4 +23,9 @@ __all__ = [
     "IntervalCensoredEMStage",
     # Metrics
     "incomplete_loglik_interval",
+    # Simulation helpers
+    "interval_censor",
+    "interval_censor_inspection_uniform",
+    "interval_censor_current_status_uniform",
+    "interval_censor_width_uniform",
 ]

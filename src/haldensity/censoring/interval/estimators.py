@@ -245,12 +245,22 @@ class IntervalCensoredInitEstimator(BaseEstimator):
             non_zero = np.where(self.theta_hat[knot_start:] != 0)[0]
             self.grid_points_hal_selected = grid_points_hal[non_zero].copy() if non_zero.size > 0 else np.array([])
 
-        # Normalized density on output grid
-        output_grid = np.linspace(0.0, 1.0, self.n_grid_points)
+        # Normalized density on an evaluation grid.
+        #
+        # For order=0 (step-function HAL), the fitted log-density can have many
+        # sharp jumps if knot locations are clustered. A coarse evaluation grid can
+        # miss these jumps, producing densities that appear normalized on the
+        # coarse grid but integrate to >1 when evaluated on a finer grid.
+        #
+        # Mitigation: use a sufficiently dense uniform grid for order=0 when
+        # constructing the normalization constants used by get_density_at_points().
+        n_out = int(max(self.n_grid_points, 2000)) if self.basis_order == 0 else int(self.n_grid_points)
+        output_grid = np.linspace(0.0, 1.0, n_out)
+
         output_mid = (output_grid[:-1] + output_grid[1:]) / 2
         delta_out = output_grid[1:] - output_grid[:-1]
         density_out, _, max_log, norm_const = BaseEstimator.normalized_hal_density(
-            output_mid, self.theta_hat, grid_points_hal, self.basis_order
+            output_mid, self.theta_hat, grid_points_hal, self.basis_order, delta=delta_out
         )
         self._norm_shift = max_log
         self._norm_Z = norm_const

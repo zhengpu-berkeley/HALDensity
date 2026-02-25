@@ -487,6 +487,16 @@ class BaseCensoredInitTuner(ABC):
         )
 
 
+@dataclass(frozen=True)
+class CVOversmoothRecord:
+    """Record for a single grid point in CV-oversmooth tuning."""
+    oversmooth_factor: float
+    em_norm_factor: float
+    fold_scores: Tuple[float, ...]
+    mean_cv_ll: float
+    sd_cv_ll: float
+
+
 class BaseCensoredEMTuner(ABC):
     """Abstract base class for Stage 2 (EM) hyperparameter tuners.
     
@@ -816,3 +826,311 @@ class BaseCensoredEMTuner(ABC):
             return self._tune_with_oversmooth()
         else:
             return self._tune_without_oversmooth()
+
+
+class BaseCVOversmoothEMTuner(ABC):
+    """Abstract base for Optuna-based CV oversmooth EM tuning.
+
+    Uses Optuna to search over continuous ranges for
+    ``(oversmooth_factor, em_norm_factor)`` via K-fold cross-validation, then
+    refits with the best combination on the full dataset.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Training data.
+    stage1_estimator : Any
+        Fitted Stage 1 estimator (provides ``base_norm_constraint`` and
+        ``basis_order``).
+    cv_folds : int
+        Number of cross-validation folds.
+    random_state : int
+        Random seed.
+    n_grid_points : int
+        Number of grid points for density evaluation.
+    oversmooth_factors : list[float] | None
+        Range specification for oversmooth factor. If omitted, uses [0.1, 1.0].
+        If one value is provided, it is fixed. If multiple values are provided,
+        min/max define the sampled range.
+    em_norm_factors : list[float] | None
+        Range specification for EM norm factor. If omitted, uses [1.0, 5.0].
+        If one value is provided, it is fixed. If multiple values are provided,
+        min/max define the sampled range.
+    em_m_imputations : int
+        Number of imputations for EM E-step.
+    em_max_em_iter : int
+        Maximum EM iterations per run.
+    em_tol : float
+        EM convergence tolerance.
+    em_e_step_n_grid : int
+        Grid size for E-step inverse CDF.
+    em_use_sc_adjustment : bool
+        Whether to use censoring-survival adjustment in right-censored E-step.
+    silent : bool
+        Suppress progress output.
+    solver : str | None
+        Solver to use.  If *None*, inherits from ``stage1_estimator``.
+    use_secondary_solver : bool | None
+        Whether to use secondary solver.
+    """
+
+    def __init__(
+        self,
+        data: pd.DataFrame,
+        stage1_estimator: Any,
+        cv_folds: int = TUNER_DEFAULTS.cv_folds,
+        random_state: int = TUNER_DEFAULTS.random_state,
+        n_grid_points: int = TUNER_DEFAULTS.n_grid_points,
+        oversmooth_factors: Optional[list[float]] = None,
+        em_norm_factors: Optional[list[float]] = None,
+        em_m_imputations: int = EM_DEFAULTS.m_imputations,
+        em_max_em_iter: int = 20,
+        em_tol: float = EM_DEFAULTS.em_tol,
+        em_e_step_n_grid: int = EM_DEFAULTS.e_step_n_grid,
+        em_use_sc_adjustment: bool = EM_DEFAULTS.use_sc_adjustment,
+        silent: bool = True,
+        solver: Optional[str] = None,
+        use_secondary_solver: Optional[bool] = None,
+    ):
+        self.data = data.reset_index(drop=True)
+        self.stage1_estimator = stage1_estimator
+        self.cv_folds = int(cv_folds)
+        self.random_state = int(random_state)
+        self.n_grid_points = int(n_grid_points)
+        self.silent = bool(silent)
+
+        self.base_norm_constraint = float(getattr(
+            stage1_estimator, "norm_constraint",
+            getattr(stage1_estimator, "_norm_constraint", 100.0),
+        ))
+        self.basis_order = int(stage1_estimator.basis_order)
+
+        if solver is not None:
+            self.solver = str(solver)
+        else:
+            self.solver = str(getattr(stage1_estimator, "solver", TUNER_DEFAULTS.solver))
+        if use_secondary_solver is not None:
+            self.use_secondary_solver = bool(use_secondary_solver)
+        else:
+            self.use_secondary_solver = bool(getattr(
+                stage1_estimator, "use_secondary_solver",
+                TUNER_DEFAULTS.use_secondary_solver,
+            ))
+
+        self.oversmooth_factors = (
+            [0.1, 1.0]
+            if oversmooth_factors is None
+            else sorted({float(x) for x in oversmooth_factors})
+        )
+        self.em_norm_factors = (
+            [1.0, 5.0]
+            if em_norm_factors is None
+            else sorted({float(x) for x in em_norm_factors})
+        )
+
+        self.em_m_imputations = int(em_m_imputations)
+        self.em_max_em_iter = int(em_max_em_iter)
+        self.em_tol = float(em_tol)
+        self.em_e_step_n_grid = int(em_e_step_n_grid)
+        self.em_use_sc_adjustment = bool(em_use_sc_adjustment)
+
+        self.kfold = KFold(
+            n_splits=self.cv_folds, shuffle=True, random_state=self.random_state,
+        )
+
+        # Results
+        self.cv_records: Optional[list[CVOversmoothRecord]] = None
+        self.best_record: Optional[CVOversmoothRecord] = None
+        self.best_params: Optional[Dict[str, Any]] = None
+        self.study: Optional[optuna.Study] = None
+
+    # ------------------------------------------------------------------
+    # Abstract interface – subclasses provide data-specific behaviour
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    def _fit_init_estimator_on_data(
+        self, data: pd.DataFrame, norm_constraint: float,
+    ) -> Any:
+        """Fit a Stage-1 init estimator on *data*."""
+
+    @abstractmethod
+    def _run_em_stage_on_data(
+        self,
+        initial_estimator: Any,
+        data: pd.DataFrame,
+        m_step_norm_constraint: float,
+    ) -> Any:
+        """Run EM on *data* starting from *initial_estimator*.
+
+        Must return an ``EMStageResult``-like object with a
+        ``final_estimator`` attribute.
+        """
+
+    @abstractmethod
+    def _compute_loglik_on_data(
+        self, estimator: Any, data: pd.DataFrame,
+    ) -> float:
+        """Compute incomplete-data log-likelihood of *estimator* on *data*."""
+
+    # ------------------------------------------------------------------
+    # Optuna CV search
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _range_from_values(values: list[float], name: str) -> Tuple[float, float]:
+        if len(values) == 0:
+            raise ValueError(f"{name} must contain at least one value")
+        lo = float(min(values))
+        hi = float(max(values))
+        if lo <= 0.0:
+            raise ValueError(f"{name} must be positive")
+        if hi < lo:
+            raise ValueError(f"{name} has invalid range")
+        return lo, hi
+
+    def _suggest_factor(self, trial: optuna.Trial, values: list[float], name: str) -> float:
+        lo, hi = self._range_from_values(values, name)
+        if np.isclose(lo, hi):
+            return float(lo)
+        return float(trial.suggest_float(name, lo, hi))
+
+    def _evaluate_params_cv(
+        self,
+        oversmooth_factor: float,
+        em_norm_factor: float,
+    ) -> CVOversmoothRecord:
+        """Evaluate one parameter pair with K-fold CV."""
+        fold_scores: list[float] = []
+        for train_idx, val_idx in self.kfold.split(self.data):
+            train_df = self.data.iloc[train_idx].reset_index(drop=True)
+            val_df = self.data.iloc[val_idx].reset_index(drop=True)
+
+            init_nc = self.base_norm_constraint * oversmooth_factor
+            m_step_nc = self.base_norm_constraint * em_norm_factor
+            try:
+                init_est = self._fit_init_estimator_on_data(train_df, init_nc)
+                em_result = self._run_em_stage_on_data(init_est, train_df, m_step_nc)
+                score = self._compute_loglik_on_data(em_result.final_estimator, val_df)
+                fold_scores.append(float(score))
+            except Exception:
+                fold_scores.append(float("-inf"))
+
+        valid = [s for s in fold_scores if np.isfinite(s)]
+        mean_ll = float(np.mean(valid)) if valid else float("-inf")
+        sd_ll = float(np.std(valid, ddof=1)) if len(valid) >= 2 else 0.0
+        return CVOversmoothRecord(
+            oversmooth_factor=float(oversmooth_factor),
+            em_norm_factor=float(em_norm_factor),
+            fold_scores=tuple(fold_scores),
+            mean_cv_ll=mean_ll,
+            sd_cv_ll=sd_ll,
+        )
+
+    def _objective(self, trial: optuna.Trial) -> float:
+        """Optuna objective (negative mean CV log-likelihood)."""
+        osf = self._suggest_factor(trial, self.oversmooth_factors, "oversmooth_factor")
+        enf = self._suggest_factor(trial, self.em_norm_factors, "em_norm_factor")
+        rec = self._evaluate_params_cv(osf, enf)
+        trial.set_user_attr("cv_record", rec)
+        return -rec.mean_cv_ll if np.isfinite(rec.mean_cv_ll) else float("inf")
+
+    # ------------------------------------------------------------------
+    # Refit on full data
+    # ------------------------------------------------------------------
+
+    def _refit_on_full_data(
+        self, oversmooth_factor: float, em_norm_factor: float,
+    ) -> Any:
+        """Refit with the chosen hyperparameters on the full dataset."""
+        nc = self.base_norm_constraint * oversmooth_factor
+        if np.isclose(oversmooth_factor, 1.0):
+            init_est = self.stage1_estimator
+        else:
+            init_est = self._fit_init_estimator_on_data(self.data, nc)
+
+        m_step_nc = em_norm_factor * self.base_norm_constraint
+        em_result = self._run_em_stage_on_data(init_est, self.data, m_step_nc)
+        return em_result.final_estimator
+
+    # ------------------------------------------------------------------
+    # Main entry point
+    # ------------------------------------------------------------------
+
+    def optimize(self, n_trials: int = 30) -> TuningResult:
+        """Run Optuna CV search and return the best estimator.
+
+        Returns
+        -------
+        TuningResult
+            ``(estimator, best_params, metadata)``
+        """
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        sampler = optuna.samplers.TPESampler(seed=self.random_state)
+        self.study = optuna.create_study(direction="minimize", sampler=sampler)
+
+        progress = None
+        if not self.silent:
+            from tqdm import tqdm
+            progress = tqdm(total=n_trials, desc="CV-Oversmooth Optuna", unit="trial")
+
+            def _cb(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+                trial_val = trial.value if trial.value is not None else float("inf")
+                best_cv_ll = -float(study.best_value) if np.isfinite(study.best_value) else float("-inf")
+                this_cv_ll = -float(trial_val) if np.isfinite(trial_val) else float("-inf")
+                progress.update(1)
+                progress.set_postfix(
+                    {
+                        "cv_ll": f"{this_cv_ll:.2f}",
+                        "best": f"{best_cv_ll:.2f}",
+                    }
+                )
+
+            try:
+                self.study.optimize(self._objective, n_trials=n_trials, callbacks=[_cb], show_progress_bar=False)
+            finally:
+                progress.close()
+        else:
+            self.study.optimize(self._objective, n_trials=n_trials, show_progress_bar=False)
+
+        self.cv_records = []
+        for t in self.study.trials:
+            rec = t.user_attrs.get("cv_record")
+            if isinstance(rec, CVOversmoothRecord):
+                self.cv_records.append(rec)
+        if not self.cv_records:
+            raise RuntimeError("CV-oversmooth optimization produced no valid trial records")
+        self.best_record = max(self.cv_records, key=lambda r: r.mean_cv_ll)
+
+        best_osf = self.best_record.oversmooth_factor
+        best_enf = self.best_record.em_norm_factor
+
+        if not self.silent:
+            print(
+                f"CV-Oversmooth best: oversmooth_factor={best_osf:.3f}, "
+                f"em_norm_factor={best_enf:.3f}, "
+                f"mean_cv_ll={self.best_record.mean_cv_ll:.4f} "
+                f"(sd={self.best_record.sd_cv_ll:.4f})"
+            )
+
+        estimator = self._refit_on_full_data(best_osf, best_enf)
+
+        self.best_params = {
+            "oversmooth_factor": best_osf,
+            "em_norm_factor": best_enf,
+        }
+
+        metadata: Dict[str, Any] = {
+            "cv_records": self.cv_records,
+            "best_record": self.best_record,
+            "mode": "cv_oversmooth",
+            "cv_folds": self.cv_folds,
+            "study": self.study,
+            "n_trials": int(n_trials),
+        }
+
+        return TuningResult(
+            estimator=estimator,
+            best_params=self.best_params,
+            metadata=metadata,
+        )
