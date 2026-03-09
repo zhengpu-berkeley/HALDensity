@@ -47,6 +47,11 @@ class IntervalCensoredInitEstimator(BaseEstimator):
         Order of the truncated power basis.
     solver : str
         CVXPY solver.
+    knot_strategy : str
+        Strategy for constructing knot locations (basis grid points) when
+        ``grid_points_override`` is not provided. Supported values:
+        ``"midpoint"`` (default), ``"uniform_n"``, ``"uniform_sqrt_n"``,
+        and ``"turnbull"`` (Turnbull NPMLE mass points via ``lifelines``).
     log_dir : str | None
         Logging directory.
     log_frequency : int
@@ -110,6 +115,8 @@ class IntervalCensoredInitEstimator(BaseEstimator):
         L_col: str = "L",
         R_col: str = "R",
         grid_points_override: Optional[np.ndarray] = None,
+        knot_strategy: str = "midpoint",
+        turnbull_tol: float = 1e-5,
         warm_start_theta: Optional[np.ndarray] = None,
         skip_coefficient_pruning: bool = False,
         **kwargs: Any,
@@ -126,6 +133,11 @@ class IntervalCensoredInitEstimator(BaseEstimator):
             Name of right interval column.
         grid_points_override : np.ndarray | None
             Optional fixed knot locations.
+        knot_strategy : str
+            Knot construction strategy when ``grid_points_override`` is None.
+        turnbull_tol : float
+            Convergence tolerance passed to the Turnbull fitter when
+            ``knot_strategy="turnbull"``.
         warm_start_theta : np.ndarray | None
             Optional warm start.
         skip_coefficient_pruning : bool
@@ -144,7 +156,45 @@ class IntervalCensoredInitEstimator(BaseEstimator):
         if grid_points_override is not None and len(grid_points_override) > 0:
             grid_points_hal = np.sort(np.unique(np.asarray(grid_points_override, dtype=float)))
         else:
-            grid_points_hal = np.unique(np.concatenate(([0.0], x.astype(float), [1.0])))
+            strategy = str(knot_strategy).strip().lower()
+            if strategy in {"midpoint", "default"}:
+                grid_points_hal = np.unique(np.concatenate(([0.0], x.astype(float), [1.0])))
+            elif strategy in {"uniform_n", "uniform-n"}:
+                n_knots = max(2, int(n_samples))
+                grid_points_hal = np.linspace(0.0, 1.0, n_knots, dtype=float)
+            elif strategy in {"uniform_sqrt_n", "uniform-sqrt-n", "uniform_sqrt", "uniform-sqrt"}:
+                n_knots = max(2, int(np.ceil(np.sqrt(float(n_samples)))))
+                grid_points_hal = np.linspace(0.0, 1.0, n_knots, dtype=float)
+            elif strategy in {"turnbull", "npmle", "turnbull_npmle", "turnbull-npmle"}:
+                try:
+                    from lifelines import KaplanMeierFitter  # type: ignore
+                except Exception as exc:  # pragma: no cover
+                    raise ImportError(
+                        "knot_strategy='turnbull' requires the optional dependency 'lifelines'. "
+                        "Install it (e.g. add lifelines to your environment) and retry."
+                    ) from exc
+
+                if L_col not in data.columns or R_col not in data.columns:
+                    raise ValueError(f"data must contain columns {L_col!r} and {R_col!r}")
+                L = np.asarray(data[L_col].values, dtype=float).ravel()
+                R = np.asarray(data[R_col].values, dtype=float).ravel()
+                if not (np.isfinite(L).all() and np.isfinite(R).all()):
+                    raise ValueError("Turnbull knot strategy requires finite interval endpoints.")
+
+                kmf = KaplanMeierFitter().fit_interval_censoring(L, R, tol=float(turnbull_tol))
+                cdf_df = kmf.cumulative_density_
+                if cdf_df is None or cdf_df.shape[1] == 0:
+                    raise RuntimeError("Turnbull fit failed to produce cumulative density.")
+                timeline = cdf_df.index.to_numpy(dtype=float)
+                cdf = cdf_df.iloc[:, 0].to_numpy(dtype=float)
+                dcdf = np.diff(cdf, prepend=0.0)
+                jump_times = timeline[dcdf > 0]
+                grid_points_hal = np.unique(np.concatenate(([0.0], jump_times.astype(float), [1.0])))
+            else:
+                raise ValueError(
+                    f"Unknown knot_strategy {knot_strategy!r}. "
+                    "Supported: 'midpoint', 'uniform_n', 'uniform_sqrt_n', 'turnbull'."
+                )
         self._grid_points_hal = grid_points_hal
 
         # Basis for observed points
@@ -307,6 +357,786 @@ class IntervalCensoredInitEstimator(BaseEstimator):
             raise ValueError("Estimator must be fitted before getting results.")
         base = self._get_common_results()
         base.update({"lambda_val_lag": self.lambda_val_lag, "optimized_theta_raw": self.optimized_theta_raw})
+        return base
+
+
+class IntervalCensoredFISTAEstimator(BaseEstimator):
+    """Direct interval-censored HAL-MLE with L1 penalty via FISTA.
+
+    Optimizes the composite objective:
+        g(theta) + lam * ||theta[penalized]||_1
+    where
+        g(theta) = -sum_i log P_theta(L_i < T <= R_i)
+    and ``P_theta`` is approximated on a midpoint integration grid in [0, 1].
+    """
+
+    def __init__(
+        self,
+        lam: float = 0.01,
+        n_iterations: int = 2000,
+        tol: float = 1e-6,
+        ll_change_tol: float = 1e-1,
+        n_grid_points: int = 400,
+        basis_order: int = 0,
+        initial_step: float = 1.0,
+        backtracking_factor: float = 0.5,
+        step_growth: float = 1.05,
+        max_step: float = 1.0,
+        max_backtracking: int = 30,
+        min_interval_mass: float = 1e-12,
+        include_intercept_in_penalty: bool = False,
+        history_every: int = 0,
+        log_dir: Optional[str] = None,
+        log_frequency: int = -1,
+    ):
+        super().__init__(
+            lam=lam,
+            n_iterations=n_iterations,
+            tol=tol,
+            basis_order=basis_order,
+            log_dir=log_dir,
+            log_frequency=log_frequency,
+        )
+        self.n_grid_points = int(n_grid_points)
+        self.ll_change_tol = float(ll_change_tol)
+        self.initial_step = float(initial_step)
+        self.backtracking_factor = float(backtracking_factor)
+        self.step_growth = float(step_growth)
+        self.max_step = float(max_step)
+        self.max_backtracking = int(max_backtracking)
+        self.min_interval_mass = float(min_interval_mass)
+        self.include_intercept_in_penalty = bool(include_intercept_in_penalty)
+        self.history_every = int(history_every)
+
+        self._interval_mask: Optional[np.ndarray] = None
+        self._fallback_basis: Optional[np.ndarray] = None
+        self._b_grid: Optional[np.ndarray] = None
+        self._delta: Optional[np.ndarray] = None
+        self._n_samples: int = 0
+        self._n_iterations_run: int = 0
+        self._converged: bool = False
+        self._final_step: float = self.initial_step
+
+        self._norm_shift: Optional[float] = None
+        self._norm_Z: Optional[float] = None
+        self._density_midpoints: Optional[np.ndarray] = None
+        self.optimization_history_: list[dict[str, float | int]] = []
+
+    @staticmethod
+    def _build_knot_grid(
+        data: pd.DataFrame,
+        x_mid: np.ndarray,
+        knot_strategy: str,
+        turnbull_tol: float,
+        grid_points_override: Optional[np.ndarray],
+        L_col: str,
+        R_col: str,
+    ) -> np.ndarray:
+        if grid_points_override is not None and len(grid_points_override) > 0:
+            return np.sort(np.unique(np.asarray(grid_points_override, dtype=float)))
+
+        strategy = str(knot_strategy).strip().lower()
+        n_samples = int(x_mid.shape[0])
+
+        if strategy in {"midpoint", "default"}:
+            return np.unique(np.concatenate(([0.0], x_mid.astype(float), [1.0])))
+        if strategy in {"uniform_n", "uniform-n"}:
+            n_knots = max(2, int(n_samples))
+            return np.linspace(0.0, 1.0, n_knots, dtype=float)
+        if strategy in {"uniform_sqrt_n", "uniform-sqrt-n", "uniform_sqrt", "uniform-sqrt"}:
+            n_knots = max(2, int(np.ceil(np.sqrt(float(n_samples)))))
+            return np.linspace(0.0, 1.0, n_knots, dtype=float)
+        if strategy in {"turnbull", "npmle", "turnbull_npmle", "turnbull-npmle"}:
+            try:
+                from lifelines import KaplanMeierFitter  # type: ignore
+            except Exception as exc:  # pragma: no cover
+                raise ImportError(
+                    "knot_strategy='turnbull' requires the optional dependency 'lifelines'."
+                ) from exc
+
+            if L_col not in data.columns or R_col not in data.columns:
+                raise ValueError(f"data must contain columns {L_col!r} and {R_col!r}")
+
+            L = np.asarray(data[L_col].values, dtype=float).ravel()
+            R = np.asarray(data[R_col].values, dtype=float).ravel()
+            kmf = KaplanMeierFitter().fit_interval_censoring(L, R, tol=float(turnbull_tol))
+            cdf_df = kmf.cumulative_density_
+            if cdf_df is None or cdf_df.shape[1] == 0:
+                raise RuntimeError("Turnbull fit failed to produce cumulative density.")
+            timeline = cdf_df.index.to_numpy(dtype=float)
+            cdf = cdf_df.iloc[:, 0].to_numpy(dtype=float)
+            dcdf = np.diff(cdf, prepend=0.0)
+            jump_times = timeline[dcdf > 0]
+            return np.unique(np.concatenate(([0.0], jump_times.astype(float), [1.0])))
+
+        raise ValueError(
+            f"Unknown knot_strategy {knot_strategy!r}. "
+            "Supported: 'midpoint', 'uniform_n', 'uniform_sqrt_n', 'turnbull'."
+        )
+
+    def _soft_threshold(self, z: np.ndarray, thresh: float) -> np.ndarray:
+        out = np.asarray(z, dtype=float).copy()
+        start_idx = 0 if self.include_intercept_in_penalty else 1
+        if start_idx < out.size:
+            u = out[start_idx:]
+            out[start_idx:] = np.sign(u) * np.maximum(np.abs(u) - float(thresh), 0.0)
+        return out
+
+    def _smooth_loss_and_grad(
+        self,
+        theta: np.ndarray,
+        *,
+        compute_grad: bool = True,
+    ) -> tuple[float, Optional[np.ndarray]]:
+        if self._b_grid is None or self._delta is None or self._interval_mask is None:
+            raise RuntimeError("Internal FISTA structures are not initialized")
+
+        log_f = self._b_grid @ theta
+        max_log_f = float(np.max(log_f))
+        weights = np.exp(np.clip(log_f - max_log_f, -700, 700)) * self._delta
+        Z = float(np.sum(weights))
+        if Z <= 0.0 or not np.isfinite(Z):
+            return float("inf"), (np.zeros_like(theta) if compute_grad else None)
+        prob = weights / Z
+
+        weighted_intervals = self._interval_mask * prob[None, :]
+        masses = np.sum(weighted_intervals, axis=1)
+        safe_masses = np.maximum(masses, self.min_interval_mass)
+        loss = -float(np.sum(np.log(safe_masses)))
+
+        if not compute_grad:
+            return loss, None
+
+        global_mean = prob @ self._b_grid
+        cond_means = weighted_intervals @ self._b_grid
+
+        non_tiny = masses > self.min_interval_mass
+        if np.any(non_tiny):
+            cond_means[non_tiny] /= masses[non_tiny, None]
+        if np.any(~non_tiny):
+            if self._fallback_basis is None:
+                raise RuntimeError("Fallback basis not initialized")
+            cond_means[~non_tiny] = self._fallback_basis[~non_tiny]
+
+        grad = self._n_samples * global_mean - np.sum(cond_means, axis=0)
+        return loss, np.asarray(grad, dtype=float)
+
+    def fit(  # type: ignore[override]
+        self,
+        data: pd.DataFrame,
+        *,
+        L_col: str = "L",
+        R_col: str = "R",
+        grid_points_override: Optional[np.ndarray] = None,
+        knot_strategy: str = "midpoint",
+        turnbull_tol: float = 1e-5,
+        warm_start_theta: Optional[np.ndarray] = None,
+        **kwargs: Any,
+    ) -> "IntervalCensoredFISTAEstimator":
+        if L_col not in data.columns or R_col not in data.columns:
+            raise ValueError(f"data must contain columns {L_col!r} and {R_col!r}")
+
+        L = np.asarray(data[L_col].values, dtype=float).ravel()
+        R = np.asarray(data[R_col].values, dtype=float).ravel()
+        if L.size == 0:
+            raise ValueError("data must be non-empty")
+        if L.shape != R.shape:
+            raise ValueError("L and R must have the same shape")
+
+        self._n_samples = int(L.shape[0])
+        x_mid = 0.5 * (L + R)
+
+        grid_points_hal = self._build_knot_grid(
+            data=data,
+            x_mid=x_mid,
+            knot_strategy=knot_strategy,
+            turnbull_tol=turnbull_tol,
+            grid_points_override=grid_points_override,
+            L_col=L_col,
+            R_col=R_col,
+        )
+        self._grid_points_hal = grid_points_hal
+
+        grid_eval = np.linspace(0.0, 1.0, int(self.n_grid_points))
+        midpoints = (grid_eval[:-1] + grid_eval[1:]) / 2.0
+        delta = grid_eval[1:] - grid_eval[:-1]
+
+        df_mid = pd.DataFrame({"W1": midpoints})
+        b_grid, basis_names = create_basis_functions(
+            df_mid, grid_points_hal, order=self.basis_order, include_intercept=True
+        )
+        self.basis_names = basis_names
+
+        interval_mask = ((midpoints[None, :] > L[:, None]) & (midpoints[None, :] <= R[:, None])).astype(float)
+        centers = np.clip(0.5 * (L + R), 0.0, 1.0)
+        df_centers = pd.DataFrame({"W1": centers})
+        fallback_basis, _ = create_basis_functions(
+            df_centers, grid_points_hal, order=self.basis_order, include_intercept=True
+        )
+
+        self._b_grid = b_grid
+        self._delta = delta
+        self._interval_mask = interval_mask
+        self._fallback_basis = fallback_basis
+
+        K = int(b_grid.shape[1])
+        if warm_start_theta is not None and len(warm_start_theta) == K:
+            theta = np.asarray(warm_start_theta, dtype=float).ravel().copy()
+        else:
+            theta = np.zeros(K, dtype=float)
+
+        y = theta.copy()
+        tk = 1.0
+        step = min(self.initial_step, self.max_step)
+        prev_ll = float("inf")
+        self.optimization_history_ = []
+
+        converged = False
+        n_run = 0
+
+        for it in range(1, int(self.n_iterations) + 1):
+            n_run = it
+            g_y, grad_y = self._smooth_loss_and_grad(y, compute_grad=True)
+            if grad_y is None:
+                raise RuntimeError("Gradient computation failed")
+            if not np.isfinite(g_y):
+                break
+
+            step_k = step
+            x_next = theta.copy()
+            g_next = float("inf")
+            diff = np.zeros_like(theta)
+
+            for _ in range(self.max_backtracking):
+                candidate = self._soft_threshold(y - step_k * grad_y, self.lam * step_k)
+                g_cand, _ = self._smooth_loss_and_grad(candidate, compute_grad=False)
+                if not np.isfinite(g_cand):
+                    step_k *= self.backtracking_factor
+                    continue
+                cand_diff = candidate - y
+                quad_bound = g_y + float(np.dot(grad_y, cand_diff)) + 0.5 / step_k * float(
+                    np.dot(cand_diff, cand_diff)
+                )
+                if g_cand <= quad_bound + 1e-10:
+                    x_next = candidate
+                    g_next = g_cand
+                    diff = cand_diff
+                    break
+                step_k *= self.backtracking_factor
+
+            reg_start = 0 if self.include_intercept_in_penalty else 1
+            reg_term = float(np.sum(np.abs(x_next[reg_start:]))) if reg_start < x_next.size else 0.0
+            obj_next = g_next + self.lam * reg_term
+            if self._check_objective_explosion(float(obj_next), it):
+                break
+
+            param_change = float(np.max(np.abs(x_next - theta)))
+            ll_next = float(-g_next)
+            ll_change = float(abs(ll_next - prev_ll)) if np.isfinite(prev_ll) else float("inf")
+
+            t_next = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * tk * tk))
+            y = x_next + ((tk - 1.0) / t_next) * (x_next - theta)
+            theta = x_next
+            tk = t_next
+            step = min(step_k * self.step_growth, self.max_step)
+            prev_ll = ll_next
+
+            if self.do_log and self.log_frequency > 0 and it % self.log_frequency == 0:
+                n_nonzero = int(np.sum(np.abs(theta[reg_start:]) > self.tol)) if reg_start < theta.size else 0
+                self.logger.info(
+                    "Iter %d: obj=%.6f, g=%.6f, ll=%.6f, change=%.3e, ll_change=%.3e, step=%.3e, nnz=%d",
+                    it,
+                    obj_next,
+                    g_next,
+                    ll_next,
+                    param_change,
+                    ll_change,
+                    step_k,
+                    n_nonzero,
+                )
+
+            if self.history_every > 0 and it % self.history_every == 0:
+                poly_cols = self.basis_order if self.basis_order > 0 else 0
+                knot_start = min(theta.size, 1 + poly_cols)
+                n_selected = int(np.sum(np.abs(theta[knot_start:]) > self.tol)) if knot_start < theta.size else 0
+                self.optimization_history_.append({
+                    "iteration": int(it),
+                    "log_likelihood": float(-g_next),
+                    "l1_norm": float(reg_term),
+                    "n_selected_points": int(n_selected),
+                })
+
+            if ll_change < self.ll_change_tol:
+                converged = True
+                break
+
+        if self.history_every > 0 and n_run > 0:
+            if len(self.optimization_history_) == 0 or int(self.optimization_history_[-1]["iteration"]) != int(n_run):
+                g_final, _ = self._smooth_loss_and_grad(theta, compute_grad=False)
+                reg_start = 0 if self.include_intercept_in_penalty else 1
+                reg_term = float(np.sum(np.abs(theta[reg_start:]))) if reg_start < theta.size else 0.0
+                poly_cols = self.basis_order if self.basis_order > 0 else 0
+                knot_start = min(theta.size, 1 + poly_cols)
+                n_selected = int(np.sum(np.abs(theta[knot_start:]) > self.tol)) if knot_start < theta.size else 0
+                self.optimization_history_.append({
+                    "iteration": int(n_run),
+                    "log_likelihood": float(-g_final),
+                    "l1_norm": float(reg_term),
+                    "n_selected_points": int(n_selected),
+                })
+
+        self.theta_hat = theta
+        self._n_iterations_run = int(n_run)
+        self._converged = bool(converged)
+        self._final_step = float(step)
+
+        poly_cols = self.basis_order if self.basis_order > 0 else 0
+        knot_start = 1 + poly_cols
+        if self.theta_hat.size < knot_start:
+            knot_start = self.theta_hat.size
+        if knot_start < self.theta_hat.size:
+            non_zero = np.where(np.abs(self.theta_hat[knot_start:]) > self.tol)[0]
+            self.grid_points_hal_selected = (
+                grid_points_hal[non_zero].copy() if non_zero.size > 0 else np.array([])
+            )
+        else:
+            self.grid_points_hal_selected = np.array([])
+
+        n_out = int(max(self.n_grid_points, 2000)) if self.basis_order == 0 else int(self.n_grid_points)
+        output_grid = np.linspace(0.0, 1.0, n_out)
+        output_mid = (output_grid[:-1] + output_grid[1:]) / 2
+        delta_out = output_grid[1:] - output_grid[:-1]
+        density_out, _, max_log, norm_const = BaseEstimator.normalized_hal_density(
+            output_mid, self.theta_hat, grid_points_hal, self.basis_order, delta=delta_out
+        )
+        self._norm_shift = max_log
+        self._norm_Z = norm_const
+        self._density_midpoints = density_out
+
+        self.grid_midpoints = output_mid
+        self.delta_j = delta_out
+        self.grid_points = output_grid
+        self.is_fitted = True
+        self.fitted_theta_dict = {
+            name: float(value) for name, value in zip(self.basis_names, self.theta_hat)
+        }
+        return self
+
+    def _normalized_density(self, points: np.ndarray) -> np.ndarray:
+        if self._norm_shift is None or self._norm_Z is None:
+            raise RuntimeError("Estimator must be fitted before requesting density")
+        if self._grid_points_hal is None:
+            raise RuntimeError("Estimator must be fitted before requesting density")
+        pts = np.asarray(points, dtype=float).ravel()
+        df_pts = pd.DataFrame({"W1": pts})
+        basis_eval, _ = create_basis_functions(
+            df_pts, self._grid_points_hal, order=self.basis_order, include_intercept=True
+        )
+        log_eval = basis_eval @ self.theta_hat
+        shifted = np.clip(log_eval - self._norm_shift, -700, 700)
+        return np.exp(shifted) / self._norm_Z
+
+    def get_density(self) -> tuple[np.ndarray, np.ndarray]:
+        if not self.is_fitted or self._density_midpoints is None:
+            raise ValueError("Estimator must be fitted before getting density.")
+        if self.grid_midpoints is None:
+            raise ValueError("Estimator must be fitted before getting density.")
+        return self.grid_midpoints, self._density_midpoints.copy()
+
+    def get_density_at_points(self, points: np.ndarray) -> np.ndarray:
+        if not self.is_fitted:
+            raise ValueError("Estimator must be fitted before getting density.")
+        return self._normalized_density(points)
+
+    def get_results(self) -> dict:
+        if not self.is_fitted:
+            raise ValueError("Estimator must be fitted before getting results.")
+        base = self._get_common_results()
+        base.update({
+            "n_iterations_run": self._n_iterations_run,
+            "converged": self._converged,
+            "final_step": self._final_step,
+            "lam": float(self.lam),
+            "ll_change_tol": float(self.ll_change_tol),
+            "coef_tol": float(self.tol),
+            "optimization_history": list(self.optimization_history_),
+        })
+        return base
+
+
+class IntervalCensoredProjectedGDEstimator(BaseEstimator):
+    """Direct interval-censored HAL-MLE via projected gradient descent.
+
+    Solves:
+        min_theta g(theta)  s.t. ||theta[penalized]||_1 <= norm_constraint
+    where g(theta) is the interval-censored negative log-likelihood.
+    """
+
+    def __init__(
+        self,
+        norm_constraint: float = 3.0,
+        learning_rate: float = 1e-1,
+        n_iterations: int = 3000,
+        tol: float = 1e-6,
+        ll_change_tol: float = 1e-4,
+        n_grid_points: int = 400,
+        basis_order: int = 0,
+        min_interval_mass: float = 1e-12,
+        include_intercept_in_constraint: bool = False,
+        use_nesterov: bool = False,
+        nesterov_restart: bool = True,
+        max_backtracking: int = 20,
+        backtracking_factor: float = 0.5,
+        min_learning_rate: float = 1e-8,
+        history_every: int = 0,
+        log_dir: Optional[str] = None,
+        log_frequency: int = -1,
+    ):
+        super().__init__(
+            n_iterations=n_iterations,
+            tol=tol,
+            basis_order=basis_order,
+            log_dir=log_dir,
+            log_frequency=log_frequency,
+        )
+        self.norm_constraint = float(norm_constraint)
+        self.learning_rate = float(learning_rate)
+        self.ll_change_tol = float(ll_change_tol)
+        self.n_grid_points = int(n_grid_points)
+        self.min_interval_mass = float(min_interval_mass)
+        self.include_intercept_in_constraint = bool(include_intercept_in_constraint)
+        self.use_nesterov = bool(use_nesterov)
+        self.nesterov_restart = bool(nesterov_restart)
+        self.max_backtracking = int(max_backtracking)
+        self.backtracking_factor = float(backtracking_factor)
+        self.min_learning_rate = float(min_learning_rate)
+        self.history_every = int(history_every)
+
+        self._interval_mask: Optional[np.ndarray] = None
+        self._fallback_basis: Optional[np.ndarray] = None
+        self._b_grid: Optional[np.ndarray] = None
+        self._delta: Optional[np.ndarray] = None
+        self._n_samples: int = 0
+        self._n_iterations_run: int = 0
+        self._converged: bool = False
+        self._density_midpoints: Optional[np.ndarray] = None
+        self._norm_shift: Optional[float] = None
+        self._norm_Z: Optional[float] = None
+        self.optimization_history_: list[dict[str, float | int]] = []
+        self._final_learning_rate: float = self.learning_rate
+
+    @staticmethod
+    def _project_onto_l1_ball(v: np.ndarray, z: float) -> np.ndarray:
+        if z <= 0:
+            return np.zeros_like(v)
+        if float(np.sum(np.abs(v))) <= z:
+            return v
+        u = np.sort(np.abs(v))[::-1]
+        sv = np.cumsum(u)
+        rho = np.where(u > (sv - z) / np.arange(1, len(u) + 1))[0]
+        rho_idx = int(rho[-1]) if len(rho) > 0 else 0
+        tau = (sv[rho_idx] - z) / float(rho_idx + 1)
+        return np.sign(v) * np.maximum(np.abs(v) - tau, 0.0)
+
+    def _apply_constraint(self, theta: np.ndarray) -> np.ndarray:
+        out = np.asarray(theta, dtype=float).copy()
+        start_idx = 0 if self.include_intercept_in_constraint else 1
+        if start_idx < out.size:
+            out[start_idx:] = self._project_onto_l1_ball(out[start_idx:], self.norm_constraint)
+        return out
+
+    def _smooth_loss_and_grad(
+        self,
+        theta: np.ndarray,
+        *,
+        compute_grad: bool = True,
+    ) -> tuple[float, Optional[np.ndarray]]:
+        if self._b_grid is None or self._delta is None or self._interval_mask is None:
+            raise RuntimeError("Internal ProjectedGD structures are not initialized")
+
+        log_f = self._b_grid @ theta
+        max_log_f = float(np.max(log_f))
+        weights = np.exp(np.clip(log_f - max_log_f, -700, 700)) * self._delta
+        Z = float(np.sum(weights))
+        if Z <= 0.0 or not np.isfinite(Z):
+            return float("inf"), (np.zeros_like(theta) if compute_grad else None)
+        prob = weights / Z
+
+        weighted_intervals = self._interval_mask * prob[None, :]
+        masses = np.sum(weighted_intervals, axis=1)
+        safe_masses = np.maximum(masses, self.min_interval_mass)
+        loss = -float(np.sum(np.log(safe_masses)))
+
+        if not compute_grad:
+            return loss, None
+
+        global_mean = prob @ self._b_grid
+        cond_means = weighted_intervals @ self._b_grid
+        non_tiny = masses > self.min_interval_mass
+        if np.any(non_tiny):
+            cond_means[non_tiny] /= masses[non_tiny, None]
+        if np.any(~non_tiny):
+            if self._fallback_basis is None:
+                raise RuntimeError("Fallback basis not initialized")
+            cond_means[~non_tiny] = self._fallback_basis[~non_tiny]
+
+        grad = self._n_samples * global_mean - np.sum(cond_means, axis=0)
+        return loss, np.asarray(grad, dtype=float)
+
+    def fit(  # type: ignore[override]
+        self,
+        data: pd.DataFrame,
+        *,
+        L_col: str = "L",
+        R_col: str = "R",
+        grid_points_override: Optional[np.ndarray] = None,
+        knot_strategy: str = "midpoint",
+        turnbull_tol: float = 1e-5,
+        warm_start_theta: Optional[np.ndarray] = None,
+        **kwargs: Any,
+    ) -> "IntervalCensoredProjectedGDEstimator":
+        if L_col not in data.columns or R_col not in data.columns:
+            raise ValueError(f"data must contain columns {L_col!r} and {R_col!r}")
+
+        L = np.asarray(data[L_col].values, dtype=float).ravel()
+        R = np.asarray(data[R_col].values, dtype=float).ravel()
+        if L.size == 0:
+            raise ValueError("data must be non-empty")
+        if L.shape != R.shape:
+            raise ValueError("L and R must have the same shape")
+
+        self._n_samples = int(L.shape[0])
+        x_mid = 0.5 * (L + R)
+
+        grid_points_hal = IntervalCensoredFISTAEstimator._build_knot_grid(
+            data=data,
+            x_mid=x_mid,
+            knot_strategy=knot_strategy,
+            turnbull_tol=turnbull_tol,
+            grid_points_override=grid_points_override,
+            L_col=L_col,
+            R_col=R_col,
+        )
+        self._grid_points_hal = grid_points_hal
+
+        grid_eval = np.linspace(0.0, 1.0, int(self.n_grid_points))
+        midpoints = (grid_eval[:-1] + grid_eval[1:]) / 2.0
+        delta = grid_eval[1:] - grid_eval[:-1]
+        df_mid = pd.DataFrame({"W1": midpoints})
+        b_grid, basis_names = create_basis_functions(
+            df_mid, grid_points_hal, order=self.basis_order, include_intercept=True
+        )
+        self.basis_names = basis_names
+
+        interval_mask = ((midpoints[None, :] > L[:, None]) & (midpoints[None, :] <= R[:, None])).astype(float)
+        centers = np.clip(0.5 * (L + R), 0.0, 1.0)
+        df_centers = pd.DataFrame({"W1": centers})
+        fallback_basis, _ = create_basis_functions(
+            df_centers, grid_points_hal, order=self.basis_order, include_intercept=True
+        )
+
+        self._b_grid = b_grid
+        self._delta = delta
+        self._interval_mask = interval_mask
+        self._fallback_basis = fallback_basis
+
+        K = int(b_grid.shape[1])
+        if warm_start_theta is not None and len(warm_start_theta) == K:
+            theta = np.asarray(warm_start_theta, dtype=float).ravel().copy()
+        else:
+            theta = np.zeros(K, dtype=float)
+        theta = self._apply_constraint(theta)
+        self.optimization_history_ = []
+
+        converged = False
+        n_run = 0
+        prev_ll = float("inf")
+        y = theta.copy()
+        t_k = 1.0
+
+        for it in range(1, int(self.n_iterations) + 1):
+            n_run = it
+            base_point = y if self.use_nesterov else theta
+            g_base, grad = self._smooth_loss_and_grad(base_point, compute_grad=True)
+            if grad is None or not np.isfinite(g_base):
+                break
+
+            lr_k = float(self.learning_rate)
+            accepted = False
+            candidate = theta.copy()
+            g_next = float("inf")
+            for _ in range(self.max_backtracking):
+                proposal = self._apply_constraint(base_point - lr_k * grad)
+                g_prop, _ = self._smooth_loss_and_grad(proposal, compute_grad=False)
+                if np.isfinite(g_prop):
+                    d = proposal - base_point
+                    quad_upper = (
+                        float(g_base)
+                        + float(np.dot(grad, d))
+                        + 0.5 / float(lr_k) * float(np.dot(d, d))
+                    )
+                    if g_prop <= quad_upper + 1e-12:
+                        candidate = proposal
+                        g_next = float(g_prop)
+                        accepted = True
+                        break
+                lr_k *= self.backtracking_factor
+                if lr_k < self.min_learning_rate:
+                    break
+
+            if not accepted:
+                break
+
+            prev_theta = theta.copy()
+            theta = candidate
+            if self.use_nesterov:
+                t_next = 0.5 * (1.0 + np.sqrt(1.0 + 4.0 * t_k * t_k))
+                y_next = theta + ((t_k - 1.0) / t_next) * (theta - prev_theta)
+                if self.nesterov_restart:
+                    restart_dot = float(np.dot(theta - prev_theta, y_next - theta))
+                    if restart_dot > 0.0:
+                        t_next = 1.0
+                        y_next = theta.copy()
+                t_k = t_next
+                y = y_next
+            else:
+                y = theta.copy()
+            self._final_learning_rate = lr_k
+
+            obj_next = g_next
+            if self._check_objective_explosion(float(obj_next), it):
+                break
+
+            param_change = float(np.max(np.abs(theta - prev_theta)))
+            ll_next = float(-g_next)
+            ll_change = float(abs(ll_next - prev_ll)) if np.isfinite(prev_ll) else float("inf")
+            prev_ll = ll_next
+
+            if self.do_log and self.log_frequency > 0 and it % self.log_frequency == 0:
+                start_idx = 0 if self.include_intercept_in_constraint else 1
+                l1 = float(np.sum(np.abs(theta[start_idx:]))) if start_idx < theta.size else 0.0
+                nnz = int(np.sum(np.abs(theta[start_idx:]) > self.tol)) if start_idx < theta.size else 0
+                self.logger.info(
+                    "Iter %d: obj=%.6f, ll=%.6f, change=%.3e, ll_change=%.3e, l1=%.4f, nnz=%d",
+                    it,
+                    obj_next,
+                    ll_next,
+                    param_change,
+                    ll_change,
+                    l1,
+                    nnz,
+                )
+
+            if self.history_every > 0 and it % self.history_every == 0:
+                start_idx = 0 if self.include_intercept_in_constraint else 1
+                l1 = float(np.sum(np.abs(theta[start_idx:]))) if start_idx < theta.size else 0.0
+                poly_cols = self.basis_order if self.basis_order > 0 else 0
+                knot_start = min(theta.size, 1 + poly_cols)
+                n_selected = int(np.sum(np.abs(theta[knot_start:]) > self.tol)) if knot_start < theta.size else 0
+                self.optimization_history_.append({
+                    "iteration": int(it),
+                    "log_likelihood": float(-obj_next),
+                    "l1_norm": float(l1),
+                    "n_selected_points": int(n_selected),
+                })
+
+            if ll_change < self.ll_change_tol:
+                converged = True
+                break
+
+        if self.history_every > 0 and n_run > 0:
+            if len(self.optimization_history_) == 0 or int(self.optimization_history_[-1]["iteration"]) != int(n_run):
+                g_final, _ = self._smooth_loss_and_grad(theta, compute_grad=False)
+                start_idx = 0 if self.include_intercept_in_constraint else 1
+                l1 = float(np.sum(np.abs(theta[start_idx:]))) if start_idx < theta.size else 0.0
+                poly_cols = self.basis_order if self.basis_order > 0 else 0
+                knot_start = min(theta.size, 1 + poly_cols)
+                n_selected = int(np.sum(np.abs(theta[knot_start:]) > self.tol)) if knot_start < theta.size else 0
+                self.optimization_history_.append({
+                    "iteration": int(n_run),
+                    "log_likelihood": float(-g_final),
+                    "l1_norm": float(l1),
+                    "n_selected_points": int(n_selected),
+                })
+
+        self.theta_hat = theta
+        self._n_iterations_run = int(n_run)
+        self._converged = bool(converged)
+
+        poly_cols = self.basis_order if self.basis_order > 0 else 0
+        knot_start = 1 + poly_cols
+        if self.theta_hat.size < knot_start:
+            knot_start = self.theta_hat.size
+        if knot_start < self.theta_hat.size:
+            non_zero = np.where(np.abs(self.theta_hat[knot_start:]) > self.tol)[0]
+            self.grid_points_hal_selected = (
+                grid_points_hal[non_zero].copy() if non_zero.size > 0 else np.array([])
+            )
+        else:
+            self.grid_points_hal_selected = np.array([])
+
+        n_out = int(max(self.n_grid_points, 2000)) if self.basis_order == 0 else int(self.n_grid_points)
+        output_grid = np.linspace(0.0, 1.0, n_out)
+        output_mid = (output_grid[:-1] + output_grid[1:]) / 2
+        delta_out = output_grid[1:] - output_grid[:-1]
+        density_out, _, max_log, norm_const = BaseEstimator.normalized_hal_density(
+            output_mid, self.theta_hat, grid_points_hal, self.basis_order, delta=delta_out
+        )
+        self._norm_shift = max_log
+        self._norm_Z = norm_const
+        self._density_midpoints = density_out
+
+        self.grid_midpoints = output_mid
+        self.delta_j = delta_out
+        self.grid_points = output_grid
+        self.is_fitted = True
+        self.fitted_theta_dict = {
+            name: float(value) for name, value in zip(self.basis_names, self.theta_hat)
+        }
+        return self
+
+    def _normalized_density(self, points: np.ndarray) -> np.ndarray:
+        if self._norm_shift is None or self._norm_Z is None:
+            raise RuntimeError("Estimator must be fitted before requesting density")
+        if self._grid_points_hal is None:
+            raise RuntimeError("Estimator must be fitted before requesting density")
+        pts = np.asarray(points, dtype=float).ravel()
+        df_pts = pd.DataFrame({"W1": pts})
+        basis_eval, _ = create_basis_functions(
+            df_pts, self._grid_points_hal, order=self.basis_order, include_intercept=True
+        )
+        log_eval = basis_eval @ self.theta_hat
+        shifted = np.clip(log_eval - self._norm_shift, -700, 700)
+        return np.exp(shifted) / self._norm_Z
+
+    def get_density(self) -> tuple[np.ndarray, np.ndarray]:
+        if not self.is_fitted or self._density_midpoints is None:
+            raise ValueError("Estimator must be fitted before getting density.")
+        if self.grid_midpoints is None:
+            raise ValueError("Estimator must be fitted before getting density.")
+        return self.grid_midpoints, self._density_midpoints.copy()
+
+    def get_density_at_points(self, points: np.ndarray) -> np.ndarray:
+        if not self.is_fitted:
+            raise ValueError("Estimator must be fitted before getting density.")
+        return self._normalized_density(points)
+
+    def get_results(self) -> dict:
+        if not self.is_fitted:
+            raise ValueError("Estimator must be fitted before getting results.")
+        base = self._get_common_results()
+        base.update({
+            "n_iterations_run": self._n_iterations_run,
+            "converged": self._converged,
+            "norm_constraint": float(self.norm_constraint),
+            "learning_rate": float(self.learning_rate),
+            "ll_change_tol": float(self.ll_change_tol),
+            "coef_tol": float(self.tol),
+            "use_nesterov": bool(self.use_nesterov),
+            "nesterov_restart": bool(self.nesterov_restart),
+            "final_learning_rate": float(self._final_learning_rate),
+            "optimization_history": list(self.optimization_history_),
+        })
         return base
 
 

@@ -7,6 +7,8 @@ from .estimators import (
     IntervalCensoredInitEstimator,
     IntervalCensoredEMEstimator,
     IntervalCensoredEMStage,
+    IntervalCensoredFISTAEstimator,
+    IntervalCensoredProjectedGDEstimator,
 )
 from .metrics import incomplete_loglik_interval
 from .simulate import (
@@ -21,6 +23,8 @@ __all__ = [
     "IntervalCensoredInitEstimator",
     "IntervalCensoredEMEstimator",
     "IntervalCensoredEMStage",
+    "IntervalCensoredFISTAEstimator",
+    "IntervalCensoredProjectedGDEstimator",
     # Metrics
     "incomplete_loglik_interval",
     # Simulation helpers

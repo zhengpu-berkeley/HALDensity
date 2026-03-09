@@ -17,6 +17,8 @@ from .interval_tuners import (
     IntervalCensoredEMTuner,
     IntervalCensoredJointTuner,
     IntervalCensoredCVOversmoothEMTuner,
+    IntervalCensoredFISTATuner,
+    IntervalCensoredProjectedGDTuner,
 )
 
 __all__ = [
@@ -35,4 +37,6 @@ __all__ = [
     "IntervalCensoredEMTuner",
     "IntervalCensoredJointTuner",
     "IntervalCensoredCVOversmoothEMTuner",
+    "IntervalCensoredFISTATuner",
+    "IntervalCensoredProjectedGDTuner",
 ]

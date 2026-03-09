@@ -50,6 +50,8 @@ from .interval import (
     IntervalCensoredInitEstimator,
     IntervalCensoredEMEstimator,
     IntervalCensoredEMStage,
+    IntervalCensoredFISTAEstimator,
+    IntervalCensoredProjectedGDEstimator,
     incomplete_loglik_interval,
     interval_censor,
     interval_censor_current_status_uniform,
@@ -74,6 +76,8 @@ from .tuners import (
     IntervalCensoredEMTuner,
     IntervalCensoredJointTuner,
     IntervalCensoredCVOversmoothEMTuner,
+    IntervalCensoredFISTATuner,
+    IntervalCensoredProjectedGDTuner,
 )
 
 # Shared utilities
@@ -111,6 +115,8 @@ __all__ = [
     "IntervalCensoredInitEstimator",
     "IntervalCensoredEMEstimator",
     "IntervalCensoredEMStage",
+    "IntervalCensoredFISTAEstimator",
+    "IntervalCensoredProjectedGDEstimator",
     # Right-censored tuners
     "RightCensoredInitTuner",
     "RightCensoredEMTuner",
@@ -121,6 +127,8 @@ __all__ = [
     "IntervalCensoredEMTuner",
     "IntervalCensoredJointTuner",
     "IntervalCensoredCVOversmoothEMTuner",
+    "IntervalCensoredFISTATuner",
+    "IntervalCensoredProjectedGDTuner",
     # Submodules
     "right",
     "interval",
