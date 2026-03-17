@@ -58,7 +58,6 @@ venv.bak/
 Thumbs.db
 
 local/**
-examples/case_study/**
 uv.lock
 
 examples/local/**
