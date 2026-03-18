@@ -5,7 +5,7 @@ Contains log-likelihood functions specific to right-censored data.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 import numpy as np
 import pandas as pd
 from haldensity.utils.density_computations import generic_compute_survival_from_density
@@ -153,4 +153,40 @@ def mi_complete_loglik(
     log_terms = np.log(densities)
 
     return float(np.sum(weights * log_terms))
+
+
+def ipcw_loglik(
+    estimator: Any,
+    val_df: pd.DataFrame,
+    *,
+    time_col: str = "T",
+    delta_col: str = "Delta",
+    S_c_predict: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    km: Optional[Any] = None,
+    clip: float = 1e-6,
+) -> float:
+    """Compute the IPCW validation criterion for right-censored data.
+
+    This evaluates
+
+        sum_i Delta_i / Gbar_hat(T_i) * log f(T_i)
+
+    using a censoring-survival estimate fit on the training fold. The fitting
+    criterion itself remains unchanged; this function is intended only as an
+    alternate cross-validation score.
+    """
+    if S_c_predict is None:
+        if km is None or not hasattr(km, "predict"):
+            raise ValueError("Provide either S_c_predict or a fitted km object.")
+        S_c_predict = lambda t: np.atleast_1d(km.predict(t))
+
+    t = np.asarray(val_df[time_col].values, dtype=float)
+    d = np.asarray(val_df[delta_col].values, dtype=int)
+    f = _interp_density(estimator, t)
+    f = np.maximum(f, 1e-12)
+
+    gbar = np.asarray(S_c_predict(t), dtype=float).ravel()
+    gbar = np.maximum(gbar, float(clip))
+    weights = d / gbar
+    return float(np.sum(weights * np.log(f)))
 

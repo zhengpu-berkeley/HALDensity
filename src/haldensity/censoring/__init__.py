@@ -38,11 +38,16 @@ TuningResult : NamedTuple for tuner output
 from .right import (
     KaplanMeier,
     compute_ipcw_weights,
+    build_right_censored_knot_grid,
     RightCensoredInitEstimator,
     RightCensoredEMEstimator,
     RightCensoredEMStage,
+    RightCensoredObservedFISTAEstimator,
+    RightCensoredObservedProjectedGDEstimator,
+    RightCensoredObservedFPGDEstimator,
     incomplete_loglik,
     mi_complete_loglik,
+    ipcw_loglik,
 )
 
 # Interval-censoring module
@@ -72,6 +77,8 @@ from .tuners import (
     RightCensoredEMTuner,
     RightCensoredJointTuner,
     RightCensoredCVOversmoothEMTuner,
+    RightCensoredObservedFISTATuner,
+    RightCensoredObservedFPGDTuner,
     IntervalCensoredInitTuner,
     IntervalCensoredEMTuner,
     IntervalCensoredJointTuner,
@@ -93,6 +100,7 @@ __all__ = [
     # Utilities
     "KaplanMeier",
     "compute_ipcw_weights",
+    "build_right_censored_knot_grid",
     "interval_censor",
     "interval_censor_inspection_uniform",
     "interval_censor_current_status_uniform",
@@ -101,6 +109,7 @@ __all__ = [
     "incomplete_loglik",
     "incomplete_loglik_interval",
     "mi_complete_loglik",
+    "ipcw_loglik",
     "kl_divergence",
     # Result types
     "TuningResult",
@@ -111,6 +120,9 @@ __all__ = [
     "RightCensoredInitEstimator",
     "RightCensoredEMEstimator",
     "RightCensoredEMStage",
+    "RightCensoredObservedFISTAEstimator",
+    "RightCensoredObservedProjectedGDEstimator",
+    "RightCensoredObservedFPGDEstimator",
     # Interval-censored estimators
     "IntervalCensoredInitEstimator",
     "IntervalCensoredEMEstimator",
@@ -122,6 +134,8 @@ __all__ = [
     "RightCensoredEMTuner",
     "RightCensoredJointTuner",
     "RightCensoredCVOversmoothEMTuner",
+    "RightCensoredObservedFISTATuner",
+    "RightCensoredObservedFPGDTuner",
     # Interval-censored tuners
     "IntervalCensoredInitTuner",
     "IntervalCensoredEMTuner",

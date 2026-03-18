@@ -10,6 +10,8 @@ from .right_tuners import (
     RightCensoredEMTuner,
     RightCensoredJointTuner,
     RightCensoredCVOversmoothEMTuner,
+    RightCensoredObservedFISTATuner,
+    RightCensoredObservedFPGDTuner,
 )
 
 from .interval_tuners import (
@@ -32,6 +34,8 @@ __all__ = [
     "RightCensoredEMTuner",
     "RightCensoredJointTuner",
     "RightCensoredCVOversmoothEMTuner",
+    "RightCensoredObservedFISTATuner",
+    "RightCensoredObservedFPGDTuner",
     # Interval-censored tuners
     "IntervalCensoredInitTuner",
     "IntervalCensoredEMTuner",

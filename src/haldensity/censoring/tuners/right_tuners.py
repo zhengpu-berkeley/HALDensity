@@ -12,15 +12,20 @@ from typing import Any, Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
 import optuna
+from sklearn.model_selection import KFold
 
 from haldensity.censoring._defaults import EM_DEFAULTS, TUNER_DEFAULTS
 from haldensity.censoring.right.estimators import (
     RightCensoredInitEstimator,
     RightCensoredEMStage,
 )
+from haldensity.censoring.right.observed_mle import (
+    RightCensoredObservedFISTAEstimator,
+    RightCensoredObservedFPGDEstimator,
+)
 from haldensity.censoring.right.km import KaplanMeier
 from haldensity.censoring.right.weights import compute_ipcw_weights
-from haldensity.censoring.right.metrics import incomplete_loglik
+from haldensity.censoring.right.metrics import incomplete_loglik, ipcw_loglik
 
 from ._base import (
     BaseCensoredInitTuner,
@@ -60,6 +65,39 @@ class RightCensoredInitTuner(BaseCensoredInitTuner):
         Whether to suppress output.
     """
     
+    def __init__(
+        self,
+        data: pd.DataFrame,
+        cv_folds: int = TUNER_DEFAULTS.cv_folds,
+        random_state: int = TUNER_DEFAULTS.random_state,
+        n_grid_points: int = TUNER_DEFAULTS.n_grid_points,
+        param_overrides: Optional[Dict[str, Any]] = None,
+        use_conservative_adjustment: bool = TUNER_DEFAULTS.use_conservative_adjustment,
+        conservative_k_percent: float = TUNER_DEFAULTS.conservative_k_percent,
+        conservative_max_steps: int = TUNER_DEFAULTS.conservative_max_steps,
+        conservative_step_pct: float = TUNER_DEFAULTS.conservative_step_pct,
+        silent: bool = True,
+        validation_metric: str = "observed_loglik",
+        clip: float = 1e-6,
+    ):
+        super().__init__(
+            data=data,
+            cv_folds=cv_folds,
+            random_state=random_state,
+            n_grid_points=n_grid_points,
+            param_overrides=param_overrides,
+            use_conservative_adjustment=use_conservative_adjustment,
+            conservative_k_percent=conservative_k_percent,
+            conservative_max_steps=conservative_max_steps,
+            conservative_step_pct=conservative_step_pct,
+            silent=silent,
+        )
+        metric = str(validation_metric).strip().lower()
+        if metric not in {"observed_loglik", "ipcw_loglik"}:
+            raise ValueError("validation_metric must be 'observed_loglik' or 'ipcw_loglik'")
+        self.validation_metric = metric
+        self.clip = float(clip)
+
     def _suggest_params(self, trial: optuna.Trial) -> Dict[str, Any]:
         """Suggest tunable parameters."""
         ovr = self.param_overrides
@@ -85,10 +123,27 @@ class RightCensoredInitTuner(BaseCensoredInitTuner):
         
         return {"basis_order": basis_order, "norm_constraint": norm_constraint}
     
+    def _score_validation_fold(
+        self,
+        estimator: RightCensoredInitEstimator,
+        val_df: pd.DataFrame,
+        km: KaplanMeier,
+    ) -> float:
+        if self.validation_metric == "ipcw_loglik":
+            return ipcw_loglik(
+                estimator,
+                val_df,
+                time_col="T",
+                delta_col="Delta",
+                km=km,
+                clip=self.clip,
+            )
+        return incomplete_loglik(estimator, val_df, time_col="T", delta_col="Delta")
+
     def _evaluate_fold(
-        self, 
-        train_df: pd.DataFrame, 
-        val_df: pd.DataFrame, 
+        self,
+        train_df: pd.DataFrame,
+        val_df: pd.DataFrame,
         params: Dict[str, Any]
     ) -> float:
         """Evaluate parameters on a single CV fold."""
@@ -112,8 +167,8 @@ class RightCensoredInitTuner(BaseCensoredInitTuner):
             use_secondary_solver=bool(self._defaults["use_secondary_solver"]),
         )
         est.fit(df_unc, sample_weights=w_unc)
-        
-        return incomplete_loglik(est, val_df, time_col="T", delta_col="Delta")
+
+        return self._score_validation_fold(est, val_df, km)
     
     def _fit_final_estimator(self, params: Dict[str, Any]) -> RightCensoredInitEstimator:
         """Fit final estimator on full data."""
@@ -137,6 +192,12 @@ class RightCensoredInitTuner(BaseCensoredInitTuner):
         )
         est.fit(df_unc, sample_weights=w_unc)
         return est
+
+    def optimize(self, n_trials: int = 50) -> TuningResult:
+        result = super().optimize(n_trials=n_trials)
+        result.metadata["validation_metric"] = self.validation_metric
+        result.metadata["validation_metric_clip"] = self.clip
+        return result
 
 
 class RightCensoredEMTuner(BaseCensoredEMTuner):
@@ -395,3 +456,223 @@ class RightCensoredCVOversmoothEMTuner(BaseCVOversmoothEMTuner):
         self, estimator: Any, data: pd.DataFrame,
     ) -> float:
         return incomplete_loglik(estimator, data, time_col="T", delta_col="Delta")
+
+
+class RightCensoredObservedFISTATuner:
+    """Optuna CV tuner for direct right-censored observed-data FISTA HAL-MLE."""
+
+    def __init__(
+        self,
+        data: pd.DataFrame,
+        cv_folds: int = TUNER_DEFAULTS.cv_folds,
+        random_state: int = TUNER_DEFAULTS.random_state,
+        n_grid_points: int = TUNER_DEFAULTS.n_grid_points,
+        param_overrides: Optional[Dict[str, Any]] = None,
+        silent: bool = True,
+        time_col: str = "T",
+        delta_col: str = "Delta",
+        fista_kwargs: Optional[Dict[str, Any]] = None,
+    ):
+        self.data = data.reset_index(drop=True)
+        self.cv_folds = int(cv_folds)
+        self.random_state = int(random_state)
+        self.n_grid_points = int(n_grid_points)
+        self.param_overrides = param_overrides or {}
+        self.silent = bool(silent)
+        self.time_col = str(time_col)
+        self.delta_col = str(delta_col)
+        self.fista_kwargs = dict(fista_kwargs or {})
+
+        self.kfold = KFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state)
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+        self.study: Optional[optuna.Study] = None
+        self.best_params: Optional[Dict[str, Any]] = None
+        self.best_metric_value: Optional[float] = None
+
+    def _suggest_params(self, trial: optuna.Trial) -> Dict[str, Any]:
+        ovr = self.param_overrides
+
+        basis_order_spec = ovr.get("basis_order", [0, 1])
+        if isinstance(basis_order_spec, (list, tuple)):
+            basis_order = trial.suggest_categorical("basis_order", list(basis_order_spec))
+        else:
+            basis_order = int(basis_order_spec)
+
+        lam_spec = ovr.get("lam", {"low": 1e-4, "high": 1.0, "log": True})
+        if isinstance(lam_spec, dict):
+            lam = trial.suggest_float(
+                "lam",
+                float(lam_spec["low"]),
+                float(lam_spec["high"]),
+                log=bool(lam_spec.get("log", True)),
+            )
+        else:
+            lam = float(lam_spec)
+
+        return {"basis_order": int(basis_order), "lam": float(lam)}
+
+    def _evaluate_fold(self, train_df: pd.DataFrame, val_df: pd.DataFrame, params: Dict[str, Any]) -> float:
+        est = RightCensoredObservedFISTAEstimator(
+            lam=float(params["lam"]),
+            n_grid_points=self.n_grid_points,
+            basis_order=int(params["basis_order"]),
+            **self.fista_kwargs,
+        )
+        est.fit(train_df, time_col=self.time_col, delta_col=self.delta_col)
+        return incomplete_loglik(est, val_df, time_col=self.time_col, delta_col=self.delta_col)
+
+    def _objective(self, trial: optuna.Trial) -> float:
+        params = self._suggest_params(trial)
+        scores: list[float] = []
+        for train_idx, val_idx in self.kfold.split(self.data):
+            train_df = self.data.iloc[train_idx].reset_index(drop=True)
+            val_df = self.data.iloc[val_idx].reset_index(drop=True)
+            try:
+                score = self._evaluate_fold(train_df, val_df, params)
+                scores.append(score)
+            except Exception:
+                scores.append(float("-inf"))
+        mean_score = float(np.mean(scores))
+        return -mean_score if np.isfinite(mean_score) else float("inf")
+
+    def optimize(self, n_trials: int = 30) -> TuningResult:
+        sampler = optuna.samplers.TPESampler(seed=self.random_state)
+        self.study = optuna.create_study(direction="minimize", sampler=sampler)
+        self.study.optimize(self._objective, n_trials=int(n_trials), show_progress_bar=(not self.silent))
+
+        self.best_params = {
+            "basis_order": int(self.study.best_params["basis_order"]),
+            "lam": float(self.study.best_params["lam"]),
+        }
+        self.best_metric_value = -float(self.study.best_value)
+
+        estimator = RightCensoredObservedFISTAEstimator(
+            lam=float(self.best_params["lam"]),
+            n_grid_points=self.n_grid_points,
+            basis_order=int(self.best_params["basis_order"]),
+            **self.fista_kwargs,
+        )
+        estimator.fit(self.data, time_col=self.time_col, delta_col=self.delta_col)
+
+        metadata = {
+            "best_metric_value": self.best_metric_value,
+            "study": self.study,
+            "cv_folds": self.cv_folds,
+            "validation_metric": "observed_loglik",
+        }
+        return TuningResult(
+            estimator=estimator,
+            best_params=self.best_params,
+            metadata=metadata,
+        )
+
+
+class RightCensoredObservedFPGDTuner:
+    """Optuna CV tuner for direct right-censored observed-data FPGD HAL-MLE."""
+
+    def __init__(
+        self,
+        data: pd.DataFrame,
+        cv_folds: int = TUNER_DEFAULTS.cv_folds,
+        random_state: int = TUNER_DEFAULTS.random_state,
+        n_grid_points: int = TUNER_DEFAULTS.n_grid_points,
+        param_overrides: Optional[Dict[str, Any]] = None,
+        silent: bool = True,
+        time_col: str = "T",
+        delta_col: str = "Delta",
+        fpgd_kwargs: Optional[Dict[str, Any]] = None,
+    ):
+        self.data = data.reset_index(drop=True)
+        self.cv_folds = int(cv_folds)
+        self.random_state = int(random_state)
+        self.n_grid_points = int(n_grid_points)
+        self.param_overrides = param_overrides or {}
+        self.silent = bool(silent)
+        self.time_col = str(time_col)
+        self.delta_col = str(delta_col)
+        self.fpgd_kwargs = dict(fpgd_kwargs or {})
+
+        self.kfold = KFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state)
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+        self.study: Optional[optuna.Study] = None
+        self.best_params: Optional[Dict[str, Any]] = None
+        self.best_metric_value: Optional[float] = None
+
+    def _suggest_params(self, trial: optuna.Trial) -> Dict[str, Any]:
+        ovr = self.param_overrides
+
+        basis_order_spec = ovr.get("basis_order", [0, 1])
+        if isinstance(basis_order_spec, (list, tuple)):
+            basis_order = trial.suggest_categorical("basis_order", list(basis_order_spec))
+        else:
+            basis_order = int(basis_order_spec)
+
+        nc_spec = ovr.get("norm_constraint", {"low": 1.0, "high": 100.0, "log": True})
+        if isinstance(nc_spec, dict):
+            norm_constraint = trial.suggest_float(
+                "norm_constraint",
+                float(nc_spec["low"]),
+                float(nc_spec["high"]),
+                log=bool(nc_spec.get("log", True)),
+            )
+        else:
+            norm_constraint = float(nc_spec)
+
+        return {"basis_order": int(basis_order), "norm_constraint": float(norm_constraint)}
+
+    def _evaluate_fold(self, train_df: pd.DataFrame, val_df: pd.DataFrame, params: Dict[str, Any]) -> float:
+        est = RightCensoredObservedFPGDEstimator(
+            norm_constraint=float(params["norm_constraint"]),
+            n_grid_points=self.n_grid_points,
+            basis_order=int(params["basis_order"]),
+            **self.fpgd_kwargs,
+        )
+        est.fit(train_df, time_col=self.time_col, delta_col=self.delta_col)
+        return incomplete_loglik(est, val_df, time_col=self.time_col, delta_col=self.delta_col)
+
+    def _objective(self, trial: optuna.Trial) -> float:
+        params = self._suggest_params(trial)
+        scores: list[float] = []
+        for train_idx, val_idx in self.kfold.split(self.data):
+            train_df = self.data.iloc[train_idx].reset_index(drop=True)
+            val_df = self.data.iloc[val_idx].reset_index(drop=True)
+            try:
+                score = self._evaluate_fold(train_df, val_df, params)
+                scores.append(score)
+            except Exception:
+                scores.append(float("-inf"))
+        mean_score = float(np.mean(scores))
+        return -mean_score if np.isfinite(mean_score) else float("inf")
+
+    def optimize(self, n_trials: int = 30) -> TuningResult:
+        sampler = optuna.samplers.TPESampler(seed=self.random_state)
+        self.study = optuna.create_study(direction="minimize", sampler=sampler)
+        self.study.optimize(self._objective, n_trials=int(n_trials), show_progress_bar=(not self.silent))
+
+        self.best_params = {
+            "basis_order": int(self.study.best_params["basis_order"]),
+            "norm_constraint": float(self.study.best_params["norm_constraint"]),
+        }
+        self.best_metric_value = -float(self.study.best_value)
+
+        estimator = RightCensoredObservedFPGDEstimator(
+            norm_constraint=float(self.best_params["norm_constraint"]),
+            n_grid_points=self.n_grid_points,
+            basis_order=int(self.best_params["basis_order"]),
+            **self.fpgd_kwargs,
+        )
+        estimator.fit(self.data, time_col=self.time_col, delta_col=self.delta_col)
+
+        metadata = {
+            "best_metric_value": self.best_metric_value,
+            "study": self.study,
+            "cv_folds": self.cv_folds,
+            "validation_metric": "observed_loglik",
+        }
+        return TuningResult(
+            estimator=estimator,
+            best_params=self.best_params,
+            metadata=metadata,
+        )
