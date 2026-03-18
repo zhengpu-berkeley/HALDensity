@@ -41,7 +41,58 @@ def test_right_censored_observed_estimators_fit_valid_density():
         assert np.isclose(density_mass, 1.0, atol=1e-5)
         results = estimator.get_results()
         assert int(results["n_iterations_run"]) > 0
+        assert "recovery_count" in results
         assert "optimization_history" in results
+
+
+def test_right_censored_observed_estimators_recover_from_one_unstable_step():
+    data, _ = _make_data(seed=19)
+
+    class OneRecoveryFISTA(RightCensoredObservedFISTAEstimator):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._forced_recovery_done = False
+
+        def _objective_is_unstable(self, obj: float) -> bool:
+            if not self._forced_recovery_done and np.isfinite(obj):
+                self._forced_recovery_done = True
+                return True
+            return super()._objective_is_unstable(obj)
+
+    class OneRecoveryFPGD(RightCensoredObservedFPGDEstimator):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._forced_recovery_done = False
+
+        def _objective_is_unstable(self, obj: float) -> bool:
+            if not self._forced_recovery_done and np.isfinite(obj):
+                self._forced_recovery_done = True
+                return True
+            return super()._objective_is_unstable(obj)
+
+    fista = OneRecoveryFISTA(
+        lam=0.02,
+        n_iterations=60,
+        ll_change_tol=1e-4,
+        n_grid_points=80,
+        basis_order=0,
+    ).fit(data)
+    fpgd = OneRecoveryFPGD(
+        norm_constraint=8.0,
+        n_iterations=80,
+        ll_change_tol=1e-4,
+        learning_rate=0.1,
+        n_grid_points=80,
+        basis_order=0,
+    ).fit(data)
+
+    for estimator in (fista, fpgd):
+        results = estimator.get_results()
+        assert int(results["n_iterations_run"]) > 0
+        assert int(results["recovery_count"]) >= 1
+        _, density = estimator.get_density()
+        density_mass = float(np.sum(density * estimator.delta_j))
+        assert np.isclose(density_mass, 1.0, atol=1e-5)
 
 
 def test_right_censored_method_specific_fit_interface():

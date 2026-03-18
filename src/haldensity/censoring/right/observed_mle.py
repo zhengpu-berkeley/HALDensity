@@ -82,7 +82,38 @@ class _RightCensoredObservedBase(BaseEstimator):
         self._norm_shift: Optional[float] = None
         self._norm_Z: Optional[float] = None
         self._density_midpoints: Optional[np.ndarray] = None
+        self._recovery_count: int = 0
         self.optimization_history_: list[dict[str, float | int]] = []
+
+    def _objective_is_unstable(self, obj: float) -> bool:
+        """Return True when the objective should trigger numerical recovery."""
+        return (not np.isfinite(obj)) or (obj > self.explosion_threshold) or (obj < -self.explosion_threshold)
+
+    @staticmethod
+    def _shrink_scale(scale: float, shrink_factor: float, minimum: float) -> float:
+        """Shrink a step size while respecting a lower bound."""
+        return max(float(scale) * float(shrink_factor), float(minimum))
+
+    def _record_recovery(
+        self,
+        *,
+        optimizer: str,
+        iteration: int,
+        reason: str,
+        old_scale: float,
+        new_scale: float,
+    ) -> None:
+        """Track and optionally log a numerical recovery event."""
+        self._recovery_count += 1
+        if self.do_log:
+            self.logger.warning(
+                "%s recovery at iter %d: %s; shrinking step from %.3e to %.3e and restarting momentum",
+                optimizer,
+                iteration,
+                reason,
+                old_scale,
+                new_scale,
+            )
 
     def _initialize_problem(
         self,
@@ -281,6 +312,10 @@ class RightCensoredObservedFISTAEstimator(_RightCensoredObservedBase):
         step_growth: float = 1.05,
         max_step: float = 1.0,
         max_backtracking: int = 30,
+        min_step: float = 1e-8,
+        recovery_shrink_factor: float = 0.2,
+        max_recovery_attempts: int = 8,
+        restart_on_objective_increase: bool = True,
         min_tail_mass: float = 1e-12,
         include_intercept_in_penalty: bool = False,
         history_every: int = 0,
@@ -304,6 +339,10 @@ class RightCensoredObservedFISTAEstimator(_RightCensoredObservedBase):
         self.step_growth = float(step_growth)
         self.max_step = float(max_step)
         self.max_backtracking = int(max_backtracking)
+        self.min_step = float(min_step)
+        self.recovery_shrink_factor = float(recovery_shrink_factor)
+        self.max_recovery_attempts = int(max_recovery_attempts)
+        self.restart_on_objective_increase = bool(restart_on_objective_increase)
         self.include_intercept_in_penalty = bool(include_intercept_in_penalty)
         self._final_step: float = self.initial_step
 
@@ -343,38 +382,140 @@ class RightCensoredObservedFISTAEstimator(_RightCensoredObservedBase):
         prev_ll = float("inf")
         converged = False
         n_run = 0
+        self._recovery_count = 0
         self.optimization_history_ = []
 
         for it in range(1, int(self.n_iterations) + 1):
             n_run = it
-            g_y, grad_y = self._smooth_loss_and_grad(y, compute_grad=True)
-            if grad_y is None or not np.isfinite(g_y):
-                break
-
+            reg_start = 0 if self.include_intercept_in_penalty else 1
+            accepted_iteration = False
+            recovered_this_iter = False
             step_k = step
             x_next = theta.copy()
             g_next = float("inf")
+            reg_term = 0.0
 
-            for _ in range(self.max_backtracking):
-                candidate = self._soft_threshold(y - step_k * grad_y, self.lam * step_k)
-                g_cand, _ = self._smooth_loss_and_grad(candidate, compute_grad=False)
-                if not np.isfinite(g_cand):
-                    step_k *= self.backtracking_factor
+            for _ in range(self.max_recovery_attempts + 1):
+                g_y, grad_y = self._smooth_loss_and_grad(y, compute_grad=True)
+                if grad_y is None or not np.isfinite(g_y):
+                    new_step = self._shrink_scale(step, self.recovery_shrink_factor, self.min_step)
+                    if new_step >= step:
+                        break
+                    self._record_recovery(
+                        optimizer="FISTA",
+                        iteration=it,
+                        reason="non-finite extrapolated loss",
+                        old_scale=step,
+                        new_scale=new_step,
+                    )
+                    step = new_step
+                    y = theta.copy()
+                    tk = 1.0
+                    recovered_this_iter = True
                     continue
-                cand_diff = candidate - y
-                quad_bound = g_y + float(np.dot(grad_y, cand_diff)) + 0.5 / step_k * float(
-                    np.dot(cand_diff, cand_diff)
-                )
-                if g_cand <= quad_bound + 1e-10:
-                    x_next = candidate
-                    g_next = g_cand
-                    break
-                step_k *= self.backtracking_factor
 
-            reg_start = 0 if self.include_intercept_in_penalty else 1
-            reg_term = float(np.sum(np.abs(x_next[reg_start:]))) if reg_start < x_next.size else 0.0
-            obj_next = g_next + self.lam * reg_term
-            if self._check_objective_explosion(float(obj_next), it):
+                step_k = step
+                x_next = theta.copy()
+                g_next = float("inf")
+                accepted_backtracking = False
+
+                for _ in range(self.max_backtracking):
+                    candidate = self._soft_threshold(y - step_k * grad_y, self.lam * step_k)
+                    g_cand, _ = self._smooth_loss_and_grad(candidate, compute_grad=False)
+                    if not np.isfinite(g_cand):
+                        step_k *= self.backtracking_factor
+                        if step_k < self.min_step:
+                            break
+                        continue
+                    cand_diff = candidate - y
+                    quad_bound = g_y + float(np.dot(grad_y, cand_diff)) + 0.5 / step_k * float(
+                        np.dot(cand_diff, cand_diff)
+                    )
+                    if g_cand <= quad_bound + 1e-10:
+                        x_next = candidate
+                        g_next = g_cand
+                        accepted_backtracking = True
+                        break
+                    step_k *= self.backtracking_factor
+                    if step_k < self.min_step:
+                        break
+
+                if not accepted_backtracking or not np.isfinite(g_next):
+                    scale_source = max(step_k, self.min_step)
+                    new_step = self._shrink_scale(
+                        scale_source,
+                        self.recovery_shrink_factor,
+                        self.min_step,
+                    )
+                    if new_step >= scale_source:
+                        break
+                    self._record_recovery(
+                        optimizer="FISTA",
+                        iteration=it,
+                        reason="line search failed",
+                        old_scale=scale_source,
+                        new_scale=new_step,
+                    )
+                    step = new_step
+                    y = theta.copy()
+                    tk = 1.0
+                    recovered_this_iter = True
+                    continue
+
+                reg_term = float(np.sum(np.abs(x_next[reg_start:]))) if reg_start < x_next.size else 0.0
+                obj_next = g_next + self.lam * reg_term
+                if self._objective_is_unstable(float(obj_next)):
+                    scale_source = max(step_k, self.min_step)
+                    new_step = self._shrink_scale(
+                        scale_source,
+                        self.recovery_shrink_factor,
+                        self.min_step,
+                    )
+                    if new_step >= scale_source:
+                        break
+                    self._record_recovery(
+                        optimizer="FISTA",
+                        iteration=it,
+                        reason=f"unstable objective {obj_next:.2e}",
+                        old_scale=scale_source,
+                        new_scale=new_step,
+                    )
+                    step = new_step
+                    y = theta.copy()
+                    tk = 1.0
+                    recovered_this_iter = True
+                    continue
+
+                if self.restart_on_objective_increase:
+                    g_theta, _ = self._smooth_loss_and_grad(theta, compute_grad=False)
+                    if np.isfinite(g_theta) and g_next > g_theta + 1e-10:
+                        scale_source = max(step_k, self.min_step)
+                        new_step = self._shrink_scale(
+                            scale_source,
+                            self.recovery_shrink_factor,
+                            self.min_step,
+                        )
+                        if new_step >= scale_source:
+                            break
+                        self._record_recovery(
+                            optimizer="FISTA",
+                            iteration=it,
+                            reason="objective increased under momentum",
+                            old_scale=scale_source,
+                            new_scale=new_step,
+                        )
+                        step = new_step
+                        y = theta.copy()
+                        tk = 1.0
+                        recovered_this_iter = True
+                        continue
+
+                accepted_iteration = True
+                break
+
+            if not accepted_iteration:
+                if self._objective_is_unstable(float(g_next)):
+                    self._check_objective_explosion(float(g_next), it)
                 break
 
             param_change = float(np.max(np.abs(x_next - theta)))
@@ -385,7 +526,10 @@ class RightCensoredObservedFISTAEstimator(_RightCensoredObservedBase):
             y = x_next + ((tk - 1.0) / t_next) * (x_next - theta)
             theta = x_next
             tk = t_next
-            step = min(step_k * self.step_growth, self.max_step)
+            if recovered_this_iter:
+                step = max(self.min_step, min(step_k, self.max_step))
+            else:
+                step = min(max(step_k, self.min_step) * self.step_growth, self.max_step)
             prev_ll = ll_next
 
             if self.do_log and self.log_frequency > 0 and it % self.log_frequency == 0:
@@ -449,6 +593,7 @@ class RightCensoredObservedFISTAEstimator(_RightCensoredObservedBase):
             "lam": float(self.lam),
             "ll_change_tol": float(self.ll_change_tol),
             "coef_tol": float(self.tol),
+            "recovery_count": int(self._recovery_count),
             "optimization_history": list(self.optimization_history_),
             "n_events": int(self._n_events),
             "n_censored": int(self._n_censored),
@@ -475,6 +620,9 @@ class RightCensoredObservedProjectedGDEstimator(_RightCensoredObservedBase):
         max_backtracking: int = 20,
         backtracking_factor: float = 0.5,
         min_learning_rate: float = 1e-8,
+        recovery_shrink_factor: float = 0.2,
+        max_recovery_attempts: int = 8,
+        restart_on_objective_increase: bool = True,
         history_every: int = 0,
         log_dir: Optional[str] = None,
         log_frequency: int = -1,
@@ -498,6 +646,9 @@ class RightCensoredObservedProjectedGDEstimator(_RightCensoredObservedBase):
         self.max_backtracking = int(max_backtracking)
         self.backtracking_factor = float(backtracking_factor)
         self.min_learning_rate = float(min_learning_rate)
+        self.recovery_shrink_factor = float(recovery_shrink_factor)
+        self.max_recovery_attempts = int(max_recovery_attempts)
+        self.restart_on_objective_increase = bool(restart_on_objective_increase)
         self._final_learning_rate: float = self.learning_rate
 
     @staticmethod
@@ -548,40 +699,135 @@ class RightCensoredObservedProjectedGDEstimator(_RightCensoredObservedBase):
         prev_ll = float("inf")
         y = theta.copy()
         t_k = 1.0
+        learning_rate = max(self.min_learning_rate, self.learning_rate)
+        self._recovery_count = 0
         self.optimization_history_ = []
 
         for it in range(1, int(self.n_iterations) + 1):
             n_run = it
-            base_point = y if self.use_nesterov else theta
-            g_base, grad = self._smooth_loss_and_grad(base_point, compute_grad=True)
-            if grad is None or not np.isfinite(g_base):
-                break
-
-            lr_k = float(self.learning_rate)
-            accepted = False
+            accepted_iteration = False
+            lr_k = learning_rate
             candidate = theta.copy()
             g_next = float("inf")
 
-            for _ in range(self.max_backtracking):
-                proposal = self._apply_constraint(base_point - lr_k * grad)
-                g_prop, _ = self._smooth_loss_and_grad(proposal, compute_grad=False)
-                if np.isfinite(g_prop):
-                    diff = proposal - base_point
-                    quad_upper = (
-                        float(g_base)
-                        + float(np.dot(grad, diff))
-                        + 0.5 / float(lr_k) * float(np.dot(diff, diff))
+            for _ in range(self.max_recovery_attempts + 1):
+                base_point = y if self.use_nesterov else theta
+                g_base, grad = self._smooth_loss_and_grad(base_point, compute_grad=True)
+                if grad is None or not np.isfinite(g_base):
+                    new_lr = self._shrink_scale(
+                        learning_rate,
+                        self.recovery_shrink_factor,
+                        self.min_learning_rate,
                     )
-                    if g_prop <= quad_upper + 1e-12:
-                        candidate = proposal
-                        g_next = float(g_prop)
-                        accepted = True
+                    if new_lr >= learning_rate:
                         break
-                lr_k *= self.backtracking_factor
-                if lr_k < self.min_learning_rate:
-                    break
+                    self._record_recovery(
+                        optimizer="FPGD",
+                        iteration=it,
+                        reason="non-finite extrapolated loss",
+                        old_scale=learning_rate,
+                        new_scale=new_lr,
+                    )
+                    learning_rate = new_lr
+                    y = theta.copy()
+                    t_k = 1.0
+                    continue
 
-            if not accepted:
+                lr_k = learning_rate
+                accepted = False
+                candidate = theta.copy()
+                g_next = float("inf")
+
+                for _ in range(self.max_backtracking):
+                    proposal = self._apply_constraint(base_point - lr_k * grad)
+                    g_prop, _ = self._smooth_loss_and_grad(proposal, compute_grad=False)
+                    if np.isfinite(g_prop):
+                        diff = proposal - base_point
+                        quad_upper = (
+                            float(g_base)
+                            + float(np.dot(grad, diff))
+                            + 0.5 / float(lr_k) * float(np.dot(diff, diff))
+                        )
+                        if g_prop <= quad_upper + 1e-12:
+                            candidate = proposal
+                            g_next = float(g_prop)
+                            accepted = True
+                            break
+                    lr_k *= self.backtracking_factor
+                    if lr_k < self.min_learning_rate:
+                        break
+
+                if not accepted:
+                    scale_source = max(lr_k, self.min_learning_rate)
+                    new_lr = self._shrink_scale(
+                        scale_source,
+                        self.recovery_shrink_factor,
+                        self.min_learning_rate,
+                    )
+                    if new_lr >= scale_source:
+                        break
+                    self._record_recovery(
+                        optimizer="FPGD",
+                        iteration=it,
+                        reason="line search failed",
+                        old_scale=scale_source,
+                        new_scale=new_lr,
+                    )
+                    learning_rate = new_lr
+                    y = theta.copy()
+                    t_k = 1.0
+                    continue
+
+                if self._objective_is_unstable(float(g_next)):
+                    scale_source = max(lr_k, self.min_learning_rate)
+                    new_lr = self._shrink_scale(
+                        scale_source,
+                        self.recovery_shrink_factor,
+                        self.min_learning_rate,
+                    )
+                    if new_lr >= scale_source:
+                        break
+                    self._record_recovery(
+                        optimizer="FPGD",
+                        iteration=it,
+                        reason=f"unstable objective {g_next:.2e}",
+                        old_scale=scale_source,
+                        new_scale=new_lr,
+                    )
+                    learning_rate = new_lr
+                    y = theta.copy()
+                    t_k = 1.0
+                    continue
+
+                if self.use_nesterov and self.restart_on_objective_increase:
+                    g_theta, _ = self._smooth_loss_and_grad(theta, compute_grad=False)
+                    if np.isfinite(g_theta) and g_next > g_theta + 1e-10:
+                        scale_source = max(lr_k, self.min_learning_rate)
+                        new_lr = self._shrink_scale(
+                            scale_source,
+                            self.recovery_shrink_factor,
+                            self.min_learning_rate,
+                        )
+                        if new_lr >= scale_source:
+                            break
+                        self._record_recovery(
+                            optimizer="FPGD",
+                            iteration=it,
+                            reason="objective increased under momentum",
+                            old_scale=scale_source,
+                            new_scale=new_lr,
+                        )
+                        learning_rate = new_lr
+                        y = theta.copy()
+                        t_k = 1.0
+                        continue
+
+                accepted_iteration = True
+                break
+
+            if not accepted_iteration:
+                if self._objective_is_unstable(float(g_next)):
+                    self._check_objective_explosion(float(g_next), it)
                 break
 
             prev_theta = theta.copy()
@@ -598,10 +844,8 @@ class RightCensoredObservedProjectedGDEstimator(_RightCensoredObservedBase):
                 y = y_next
             else:
                 y = theta.copy()
-            self._final_learning_rate = lr_k
-
-            if self._check_objective_explosion(float(g_next), it):
-                break
+            learning_rate = max(lr_k, self.min_learning_rate)
+            self._final_learning_rate = learning_rate
 
             param_change = float(np.max(np.abs(theta - prev_theta)))
             ll_next = float(-g_next)
@@ -674,6 +918,7 @@ class RightCensoredObservedProjectedGDEstimator(_RightCensoredObservedBase):
             "use_nesterov": bool(self.use_nesterov),
             "nesterov_restart": bool(self.nesterov_restart),
             "final_learning_rate": float(self._final_learning_rate),
+            "recovery_count": int(self._recovery_count),
             "optimization_history": list(self.optimization_history_),
             "n_events": int(self._n_events),
             "n_censored": int(self._n_censored),
