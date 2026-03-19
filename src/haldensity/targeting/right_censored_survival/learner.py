@@ -66,6 +66,27 @@ class PointwiseTMLEResult:
     diagnostics: dict[str, Any]
 
 
+@dataclass
+class PointwiseTMLEState:
+    t0: float
+    grid_edges: np.ndarray
+    grid_midpoints: np.ndarray
+    delta_j: np.ndarray
+    log_density_grid: np.ndarray
+    density_grid: np.ndarray
+    survival_grid: np.ndarray
+    edge_survival: np.ndarray
+    psi_current: float
+    target_grid_augmented_with_t0: bool
+    censoring_cache: RCCensoringCache
+    raw_direction: Optional[np.ndarray] = None
+    centered_direction: Optional[np.ndarray] = None
+    eif_values: Optional[np.ndarray] = None
+    eif_mean: float = float("nan")
+    eif_sigma: float = float("nan")
+    score_at_zero: float = float("nan")
+
+
 def _compute_survival_from_grid(density_grid: np.ndarray, delta_j: np.ndarray) -> np.ndarray:
     mass = density_grid * delta_j
     survival = np.cumsum(mass[::-1])[::-1]
@@ -627,6 +648,266 @@ def _package_pointwise_fit(
     return fit
 
 
+def _state_to_target_grid(state: PointwiseTMLEState) -> RCTargetGrid:
+    return RCTargetGrid(
+        t0=float(state.t0),
+        grid_edges=state.grid_edges.copy(),
+        grid_midpoints=state.grid_midpoints.copy(),
+        delta_j=state.delta_j.copy(),
+        density_grid=state.density_grid.copy(),
+        log_density_grid=state.log_density_grid.copy(),
+        survival_grid=state.survival_grid.copy(),
+        edge_survival=state.edge_survival.copy(),
+        t0_inserted=bool(state.target_grid_augmented_with_t0),
+    )
+
+
+def _initialize_pointwise_state(
+    initial_fit: RCInitialFit,
+    censoring_cache: RCCensoringCache,
+    t0: float,
+) -> PointwiseTMLEState:
+    target_grid = _build_pointwise_target_grid(initial_fit, float(t0))
+    psi_init = float(
+        _interp_survival_from_edges(target_grid.grid_edges, target_grid.edge_survival, np.array([t0]))[0]
+    )
+    return PointwiseTMLEState(
+        t0=float(t0),
+        grid_edges=target_grid.grid_edges.copy(),
+        grid_midpoints=target_grid.grid_midpoints.copy(),
+        delta_j=target_grid.delta_j.copy(),
+        log_density_grid=target_grid.log_density_grid.copy(),
+        density_grid=target_grid.density_grid.copy(),
+        survival_grid=target_grid.survival_grid.copy(),
+        edge_survival=target_grid.edge_survival.copy(),
+        psi_current=psi_init,
+        target_grid_augmented_with_t0=bool(target_grid.t0_inserted),
+        censoring_cache=censoring_cache,
+    )
+
+
+def _evaluate_pointwise_state(
+    state: PointwiseTMLEState,
+    observed_data: pd.DataFrame,
+    survival_clip: float,
+) -> tuple[PointwiseTMLEState, dict[str, Any]]:
+    target_grid = _state_to_target_grid(state)
+    raw_direction, centered_direction, direction_details = _compute_dfg_t0_on_grid(
+        target_grid,
+        state.censoring_cache,
+        state.t0,
+        survival_clip,
+    )
+    eif_values = _tmle_eif_values(0.0, target_grid, centered_direction, observed_data)
+    eif_mean = float(np.mean(eif_values))
+    eif_sigma = float(np.std(eif_values, ddof=1)) if eif_values.size > 1 else 0.0
+    score_at_zero = float(_tmle_score_t0(0.0, target_grid, centered_direction, observed_data))
+    psi_current = float(
+        _interp_survival_from_edges(state.grid_edges, state.edge_survival, np.array([state.t0]))[0]
+    )
+    evaluated_state = PointwiseTMLEState(
+        t0=state.t0,
+        grid_edges=state.grid_edges.copy(),
+        grid_midpoints=state.grid_midpoints.copy(),
+        delta_j=state.delta_j.copy(),
+        log_density_grid=state.log_density_grid.copy(),
+        density_grid=state.density_grid.copy(),
+        survival_grid=state.survival_grid.copy(),
+        edge_survival=state.edge_survival.copy(),
+        psi_current=psi_current,
+        target_grid_augmented_with_t0=state.target_grid_augmented_with_t0,
+        censoring_cache=state.censoring_cache,
+        raw_direction=raw_direction,
+        centered_direction=centered_direction,
+        eif_values=eif_values,
+        eif_mean=eif_mean,
+        eif_sigma=eif_sigma,
+        score_at_zero=score_at_zero,
+    )
+    return evaluated_state, {"direction_details": direction_details}
+
+
+def _one_local_tmle_update(
+    current_state: PointwiseTMLEState,
+    observed_data: pd.DataFrame,
+    *,
+    eps_bracket_start: float,
+    eps_bracket_growth: float,
+    eps_bracket_max: float,
+    eps_fallback_bounds: tuple[float, float],
+) -> tuple[PointwiseTMLEState, dict[str, Any]]:
+    if current_state.centered_direction is None:
+        raise ValueError("current_state must be evaluated before calling _one_local_tmle_update.")
+
+    target_grid = _state_to_target_grid(current_state)
+    epsilon_hat, converged_inner, solver_details = _solve_epsilon_t0(
+        target_grid,
+        current_state.centered_direction,
+        observed_data,
+        eps_bracket_start=eps_bracket_start,
+        eps_bracket_growth=eps_bracket_growth,
+        eps_bracket_max=eps_bracket_max,
+        eps_fallback_bounds=eps_fallback_bounds,
+    )
+    score_at_solution = float(
+        _tmle_score_t0(epsilon_hat, target_grid, current_state.centered_direction, observed_data)
+    )
+    objective_at_zero = float(
+        _tmle_loglik_t0(0.0, target_grid, current_state.centered_direction, observed_data)
+    )
+    objective_at_solution = float(
+        _tmle_loglik_t0(epsilon_hat, target_grid, current_state.centered_direction, observed_data)
+    )
+    solve_method = str(solver_details["method"])
+
+    finite_update = bool(np.all(np.isfinite([epsilon_hat, score_at_solution, objective_at_solution])))
+    accepted_update = bool(finite_update and converged_inner)
+    if solve_method == "bounded_fallback":
+        score_improved = abs(score_at_solution) <= 0.9 * max(abs(current_state.score_at_zero), 1e-12)
+        objective_improved = objective_at_solution >= objective_at_zero - 1e-10
+        accepted_update = bool(accepted_update and score_improved and objective_improved)
+
+    if not accepted_update:
+        return current_state, {
+            "epsilon": float(epsilon_hat),
+            "score_at_solution": score_at_solution,
+            "objective_at_solution": objective_at_solution,
+            "solve_method": solve_method,
+            "converged_inner": bool(converged_inner),
+            "accepted_update": False,
+        }
+
+    density_star, survival_star, edge_survival_star, _ = _tilted_density_and_survival(
+        target_grid,
+        current_state.centered_direction,
+        epsilon_hat,
+    )
+    updated_state = PointwiseTMLEState(
+        t0=current_state.t0,
+        grid_edges=current_state.grid_edges.copy(),
+        grid_midpoints=current_state.grid_midpoints.copy(),
+        delta_j=current_state.delta_j.copy(),
+        log_density_grid=np.log(np.clip(density_star, 1e-300, None)),
+        density_grid=density_star,
+        survival_grid=survival_star,
+        edge_survival=edge_survival_star,
+        psi_current=float(
+            _interp_survival_from_edges(
+                current_state.grid_edges, edge_survival_star, np.array([current_state.t0])
+            )[0]
+        ),
+        target_grid_augmented_with_t0=current_state.target_grid_augmented_with_t0,
+        censoring_cache=current_state.censoring_cache,
+    )
+    return updated_state, {
+        "epsilon": float(epsilon_hat),
+        "score_at_solution": score_at_solution,
+        "objective_at_solution": objective_at_solution,
+        "solve_method": solve_method,
+        "converged_inner": bool(converged_inner),
+        "accepted_update": True,
+    }
+
+
+def _iterate_tmle_t0(
+    initial_fit: RCInitialFit,
+    censoring_cache: RCCensoringCache,
+    observed_data: pd.DataFrame,
+    t0: float,
+    *,
+    survival_clip: float,
+    max_iter: int,
+    min_abs_eps: float,
+    min_score_tol: float,
+    eps_bracket_start: float,
+    eps_bracket_growth: float,
+    eps_bracket_max: float,
+    eps_fallback_bounds: tuple[float, float],
+) -> dict[str, Any]:
+    state = _initialize_pointwise_state(initial_fit, censoring_cache, t0)
+    history_rows: list[dict[str, Any]] = []
+    n_obs = observed_data.shape[0]
+    stop_reason = "max_iter"
+
+    for iteration in range(max_iter + 1):
+        state, _ = _evaluate_pointwise_state(state, observed_data, survival_clip)
+        tolerance = float(max(min_score_tol, state.eif_sigma / (np.sqrt(n_obs) * np.log(n_obs))))
+        row = {
+            "iteration": iteration,
+            "psi": state.psi_current,
+            "eif_mean": state.eif_mean,
+            "sigma": state.eif_sigma,
+            "stop_tolerance": tolerance,
+            "score_at_zero": state.score_at_zero,
+            "epsilon": float("nan"),
+            "score_at_solution": float("nan"),
+            "objective_at_solution": float("nan"),
+            "solve_method": None,
+            "converged_inner": None,
+            "accepted_update": False,
+            "status": "evaluated",
+        }
+        if abs(state.eif_mean) <= tolerance:
+            row["status"] = "score_tolerance"
+            history_rows.append(row)
+            stop_reason = "score_tolerance"
+            break
+        if iteration == max_iter:
+            row["status"] = "max_iter"
+            history_rows.append(row)
+            stop_reason = "max_iter"
+            break
+
+        updated_state, update_info = _one_local_tmle_update(
+            state,
+            observed_data,
+            eps_bracket_start=eps_bracket_start,
+            eps_bracket_growth=eps_bracket_growth,
+            eps_bracket_max=eps_bracket_max,
+            eps_fallback_bounds=eps_fallback_bounds,
+        )
+        row.update(update_info)
+        history_rows.append(row)
+
+        if not update_info["accepted_update"]:
+            history_rows[-1]["status"] = "solver_failure"
+            stop_reason = "solver_failure"
+            break
+
+        state = updated_state
+        if abs(float(update_info["epsilon"])) < min_abs_eps:
+            history_rows[-1]["status"] = "epsilon_tiny"
+            stop_reason = "epsilon_tiny"
+            break
+
+    final_state, _ = _evaluate_pointwise_state(state, observed_data, survival_clip)
+    estimand_variance, standard_error = _estimate_eic_variance(final_state.eif_values)
+    history = pd.DataFrame(history_rows)
+    epsilon_path = (
+        history.loc[history["accepted_update"], "epsilon"].to_numpy(dtype=float).tolist()
+        if len(history) > 0
+        else []
+    )
+    return {
+        "summary": {
+            "t0": float(t0),
+            "psi_star": float(final_state.psi_current),
+            "eif_mean": float(final_state.eif_mean),
+            "estimand_variance": float(estimand_variance),
+            "standard_error": float(standard_error),
+            "score_at_zero": float(final_state.score_at_zero),
+            "n_iterations": int(np.sum(history["accepted_update"])) if len(history) > 0 else 0,
+            "stop_reason": stop_reason,
+            "epsilon_path": epsilon_path,
+            "eif_mean_path": history["eif_mean"].to_numpy(dtype=float).tolist() if len(history) > 0 else [float(final_state.eif_mean)],
+            "sigma_path": history["sigma"].to_numpy(dtype=float).tolist() if len(history) > 0 else [float(final_state.eif_sigma)],
+            "psi_path": history["psi"].to_numpy(dtype=float).tolist() if len(history) > 0 else [float(final_state.psi_current)],
+        },
+        "history": history,
+        "final_state": final_state,
+    }
+
+
 class RightCensoredSurvivalTargetLearner:
     """Pointwise HAL-TMLE for right-censored survival targets."""
 
@@ -797,3 +1078,301 @@ def right_censored_survival_estimand_variance(
     _ = targeting_points
     learner = RightCensoredSurvivalTargetLearner(**kwargs)
     return learner.get_estimand_variance(targeted_fit=targeted_fit, observed_data=observed_data)
+
+
+def right_censored_survival_targeting_M_step_v2(
+    initial_estimator: RightCensoredInitEstimator,
+    observed_data: pd.DataFrame,
+    targeting_points: Union[float, Sequence[float], np.ndarray],
+    *,
+    km: Optional[KaplanMeier] = None,
+    mode: str = "auto",
+    one_step_eif_gate: float = 1e-8,
+    clip: float = 1e-6,
+    survival_clip: float = 1e-8,
+    eps_bracket_start: float = 0.25,
+    eps_bracket_growth: float = 2.0,
+    eps_bracket_max: float = 16.0,
+    eps_fallback_bounds: tuple[float, float] = (-20.0, 20.0),
+    max_iter: int = 25,
+    min_abs_eps: float = 1e-10,
+    min_score_tol: float = 1e-8,
+    store_pointwise_arrays: bool = False,
+) -> dict[str, Any]:
+    if mode not in {"auto", "one_step", "iterative"}:
+        raise ValueError("mode must be one of {'auto', 'one_step', 'iterative'}.")
+    if not isinstance(observed_data, pd.DataFrame):
+        raise TypeError("observed_data must be a pandas DataFrame.")
+    required_cols = {"T", "Delta"}
+    missing = required_cols.difference(observed_data.columns)
+    if missing:
+        raise ValueError(f"observed_data is missing required columns: {sorted(missing)}")
+
+    targeting_points_arr = _normalize_targeting_points(targeting_points)
+    if km is None:
+        km = KaplanMeier().fit(observed_data, time_col="T", delta_col="Delta")
+
+    initial_fit = _build_initial_fit(initial_estimator)
+    censoring_cache = _build_censoring_cache(km, clip=clip)
+    one_step_results = [
+        _target_survival_t0(
+            initial_fit,
+            censoring_cache,
+            observed_data,
+            float(t0),
+            survival_clip=survival_clip,
+            eps_bracket_start=eps_bracket_start,
+            eps_bracket_growth=eps_bracket_growth,
+            eps_bracket_max=eps_bracket_max,
+            eps_fallback_bounds=eps_fallback_bounds,
+            compute_diagnostic_curves=store_pointwise_arrays,
+        )
+        for t0 in targeting_points_arr
+    ]
+
+    summary_rows: list[dict[str, Any]] = []
+    pointwise_fits: list[dict[str, Any]] = []
+    for one_step in one_step_results:
+        init_state = _initialize_pointwise_state(initial_fit, censoring_cache, one_step.t0)
+        init_state, _ = _evaluate_pointwise_state(init_state, observed_data, survival_clip)
+        init_var, init_se = _estimate_eic_variance(init_state.eif_values)
+        one_step_abs_eif = float(abs(one_step.eif_mean))
+
+        if mode == "one_step":
+            use_iterative = False
+            decision_reason = "mode_one_step"
+        elif mode == "iterative":
+            use_iterative = True
+            decision_reason = "mode_iterative"
+        else:
+            use_iterative = bool(one_step_abs_eif > one_step_eif_gate)
+            decision_reason = "one_step_eif_above_gate" if use_iterative else "one_step_eif_below_gate"
+
+        iter_bundle = None
+        if use_iterative:
+            iter_bundle = _iterate_tmle_t0(
+                initial_fit=initial_fit,
+                censoring_cache=censoring_cache,
+                observed_data=observed_data,
+                t0=one_step.t0,
+                survival_clip=survival_clip,
+                max_iter=max_iter,
+                min_abs_eps=min_abs_eps,
+                min_score_tol=min_score_tol,
+                eps_bracket_start=eps_bracket_start,
+                eps_bracket_growth=eps_bracket_growth,
+                eps_bracket_max=eps_bracket_max,
+                eps_fallback_bounds=eps_fallback_bounds,
+            )
+            final_summary = iter_bundle["summary"]
+            final_state: Optional[PointwiseTMLEState] = iter_bundle["final_state"]
+            history_df: pd.DataFrame = iter_bundle["history"]
+            final_psi = float(final_summary["psi_star"])
+            final_eif_mean = float(final_summary["eif_mean"])
+            final_var = float(final_summary["estimand_variance"])
+            final_se = float(final_summary["standard_error"])
+            final_score_at_zero = float(final_summary["score_at_zero"])
+            final_stop_reason = str(final_summary["stop_reason"])
+            final_n_iterations = int(final_summary["n_iterations"])
+            final_epsilon = (
+                float(final_summary["epsilon_path"][-1]) if len(final_summary["epsilon_path"]) > 0 else 0.0
+            )
+            final_score_at_solution = (
+                float(history_df.loc[history_df["accepted_update"], "score_at_solution"].iloc[-1])
+                if np.any(history_df["accepted_update"])
+                else float("nan")
+            )
+            final_objective_at_solution = (
+                float(history_df.loc[history_df["accepted_update"], "objective_at_solution"].iloc[-1])
+                if np.any(history_df["accepted_update"])
+                else float("nan")
+            )
+            final_solve_method = (
+                str(history_df.loc[history_df["accepted_update"], "solve_method"].iloc[-1])
+                if np.any(history_df["accepted_update"])
+                else "none"
+            )
+        else:
+            final_state = None
+            history_df = pd.DataFrame()
+            final_psi = float(one_step.psi_star)
+            final_eif_mean = float(one_step.eif_mean)
+            final_var = float(one_step.estimand_variance)
+            final_se = float(one_step.standard_error)
+            final_score_at_zero = float(one_step.score_at_zero)
+            final_stop_reason = "one_step_gate" if mode == "auto" else decision_reason
+            final_n_iterations = 0
+            final_epsilon = float(one_step.epsilon)
+            final_score_at_solution = float(one_step.score_at_solution)
+            final_objective_at_solution = float(one_step.objective_at_solution)
+            final_solve_method = str(one_step.solve_method)
+
+        ci_lower = float(max(0.0, final_psi - 1.96 * final_se))
+        ci_upper = float(min(1.0, final_psi + 1.96 * final_se))
+        summary_rows.append(
+            {
+                "t0": float(one_step.t0),
+                "psi_init": float(one_step.psi_init),
+                "psi_star": final_psi,
+                "epsilon": final_epsilon,
+                "estimand_variance": final_var,
+                "standard_error": final_se,
+                "ci_lower": ci_lower,
+                "ci_upper": ci_upper,
+                "score_at_zero": final_score_at_zero,
+                "score_at_solution": final_score_at_solution,
+                "objective_at_solution": final_objective_at_solution,
+                "eif_mean": final_eif_mean,
+                "solve_method": final_solve_method,
+                "converged": bool(final_stop_reason != "solver_failure"),
+                "target_grid_augmented_with_t0": bool(one_step.diagnostics["direction_details"]["target_grid_augmented_with_t0"]),
+                "psi_initial_stage": float(init_state.psi_current),
+                "eif_mean_initial_stage": float(init_state.eif_mean),
+                "estimand_variance_initial_stage": float(init_var),
+                "standard_error_initial_stage": float(init_se),
+                "psi_one_step": float(one_step.psi_star),
+                "eif_mean_one_step": float(one_step.eif_mean),
+                "estimand_variance_one_step": float(one_step.estimand_variance),
+                "standard_error_one_step": float(one_step.standard_error),
+                "score_at_solution_one_step": float(one_step.score_at_solution),
+                "psi_final": final_psi,
+                "eif_mean_final": final_eif_mean,
+                "estimand_variance_final": final_var,
+                "standard_error_final": final_se,
+                "used_iterative": bool(use_iterative),
+                "decision_reason": decision_reason,
+                "one_step_abs_eif": one_step_abs_eif,
+                "one_step_eif_gate": float(one_step_eif_gate),
+                "n_iterations": final_n_iterations,
+                "stop_reason": final_stop_reason,
+            }
+        )
+
+        fit_row: dict[str, Any] = {
+            "t0": float(one_step.t0),
+            "targeting_points": np.asarray([one_step.t0], dtype=float),
+            "theta_targeting": np.asarray([final_epsilon], dtype=float),
+            "theta_selected": np.asarray(initial_fit.theta_hat, dtype=float).copy(),
+            "epsilon": final_epsilon,
+            "psi_init": float(one_step.psi_init),
+            "psi_star": final_psi,
+            "estimand_variance": final_var,
+            "standard_error": final_se,
+            "ci_lower": ci_lower,
+            "ci_upper": ci_upper,
+            "score_at_zero": final_score_at_zero,
+            "score_at_solution": final_score_at_solution,
+            "objective_at_solution": final_objective_at_solution,
+            "eif_mean": final_eif_mean,
+            "solve_method": final_solve_method,
+            "converged": bool(final_stop_reason != "solver_failure"),
+            "target_grid_augmented_with_t0": bool(one_step.diagnostics["direction_details"]["target_grid_augmented_with_t0"]),
+            "used_iterative": bool(use_iterative),
+            "decision_reason": decision_reason,
+            "one_step_abs_eif": one_step_abs_eif,
+            "one_step_eif_gate": float(one_step_eif_gate),
+            "n_iterations": final_n_iterations,
+            "stop_reason": final_stop_reason,
+            "initial_stage": {
+                "psi": float(init_state.psi_current),
+                "eif_mean": float(init_state.eif_mean),
+                "estimand_variance": float(init_var),
+                "standard_error": float(init_se),
+            },
+            "one_step_stage": {
+                "psi": float(one_step.psi_star),
+                "epsilon": float(one_step.epsilon),
+                "eif_mean": float(one_step.eif_mean),
+                "estimand_variance": float(one_step.estimand_variance),
+                "standard_error": float(one_step.standard_error),
+                "score_at_solution": float(one_step.score_at_solution),
+            },
+            "final_stage": {
+                "psi": final_psi,
+                "eif_mean": final_eif_mean,
+                "estimand_variance": final_var,
+                "standard_error": final_se,
+            },
+            "iteration_history": history_df.to_dict("records") if len(history_df) > 0 else [],
+            "epsilon_path": (
+                iter_bundle["summary"]["epsilon_path"] if iter_bundle is not None else []
+            ),
+            "eif_mean_path": (
+                iter_bundle["summary"]["eif_mean_path"] if iter_bundle is not None else [float(one_step.eif_mean)]
+            ),
+            "sigma_path": (
+                iter_bundle["summary"]["sigma_path"] if iter_bundle is not None else []
+            ),
+            "psi_path": (
+                iter_bundle["summary"]["psi_path"] if iter_bundle is not None else [float(one_step.psi_star)]
+            ),
+        }
+
+        if store_pointwise_arrays:
+            if use_iterative and final_state is not None:
+                fit_row.update(
+                    {
+                        "grid_eval": final_state.grid_edges.copy(),
+                        "grid_midpoints": final_state.grid_midpoints.copy(),
+                        "delta_j": final_state.delta_j.copy(),
+                        "estimated_density": final_state.density_grid.copy(),
+                        "estimated_survival": final_state.survival_grid.copy(),
+                        "targeted_survival_grid": final_state.survival_grid.copy(),
+                        "target_grid_edges": final_state.grid_edges.copy(),
+                        "target_grid_midpoints": final_state.grid_midpoints.copy(),
+                        "target_delta_j": final_state.delta_j.copy(),
+                        "density_before_grid": one_step.diagnostics["density_before_grid"],
+                        "raw_direction": final_state.raw_direction.copy() if final_state.raw_direction is not None else np.empty(0, dtype=float),
+                        "centered_direction": final_state.centered_direction.copy() if final_state.centered_direction is not None else np.empty(0, dtype=float),
+                        "eic_values": final_state.eif_values.copy() if final_state.eif_values is not None else np.empty(0, dtype=float),
+                    }
+                )
+            else:
+                fit_row.update(
+                    {
+                        "grid_eval": one_step.diagnostics["target_grid_edges"],
+                        "grid_midpoints": one_step.diagnostics["target_grid_midpoints"],
+                        "delta_j": one_step.diagnostics["target_delta_j"],
+                        "estimated_density": one_step.diagnostics["density_star_grid"],
+                        "estimated_survival": one_step.diagnostics["survival_star_grid"],
+                        "targeted_survival_grid": one_step.diagnostics["survival_star_grid"],
+                        "target_grid_edges": one_step.diagnostics["target_grid_edges"],
+                        "target_grid_midpoints": one_step.diagnostics["target_grid_midpoints"],
+                        "target_delta_j": one_step.diagnostics["target_delta_j"],
+                        "density_before_grid": one_step.diagnostics["density_before_grid"],
+                        "raw_direction": one_step.diagnostics["raw_direction_grid"],
+                        "centered_direction": one_step.diagnostics["centered_direction_grid"],
+                        "eic_values": one_step.diagnostics["eif_like_values"],
+                        "diagnostics": one_step.diagnostics,
+                    }
+                )
+
+        pointwise_fits.append(fit_row)
+
+    summary = pd.DataFrame(summary_rows).sort_values("t0").reset_index(drop=True)
+    return {
+        "targeting_points": targeting_points_arr,
+        "summary": summary,
+        "pointwise_fits": pointwise_fits,
+        "initial_fit": _serialize_initial_fit(initial_fit),
+        "censoring_cache": _serialize_censoring_cache(censoring_cache),
+        "metadata": {
+            "api_version": "v2",
+            "mode": mode,
+            "one_step_eif_gate": float(one_step_eif_gate),
+            "n_targets": int(targeting_points_arr.size),
+            "n_observations": int(observed_data.shape[0]),
+            "clip": float(clip),
+            "survival_clip": float(survival_clip),
+            "eps_bracket_start": float(eps_bracket_start),
+            "eps_bracket_growth": float(eps_bracket_growth),
+            "eps_bracket_max": float(eps_bracket_max),
+            "eps_fallback_bounds": tuple(float(x) for x in eps_fallback_bounds),
+            "max_iter": int(max_iter),
+            "min_abs_eps": float(min_abs_eps),
+            "min_score_tol": float(min_score_tol),
+            "store_pointwise_arrays": bool(store_pointwise_arrays),
+            "pointwise_design": True,
+            "decision_policy": "run one-step first; iterate only when needed",
+        },
+    }
