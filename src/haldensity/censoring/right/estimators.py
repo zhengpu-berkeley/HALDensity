@@ -584,7 +584,7 @@ class RightCensoredEMEstimator(BaseEstimator):
             basis_order=self.basis_order,
             log_dir=self.log_dir,
             log_frequency=self.log_frequency,
-            use_secondary_solver=False,
+            use_secondary_solver=True,
             solver=self.init_solver,
             include_intercept_in_constraint=True,
         )

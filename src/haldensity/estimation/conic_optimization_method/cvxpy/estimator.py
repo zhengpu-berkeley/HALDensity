@@ -1,8 +1,9 @@
 import numpy as np
 import pandas as pd
 import cvxpy as cp
-from typing import Optional, Tuple
+from typing import Optional
 from haldensity.utils.basis import create_basis_functions
+from haldensity.utils.cvxpy_solver import solve_cvxpy_problem
 from haldensity.estimation.base_estimator import BaseEstimator
 
 
@@ -24,10 +25,10 @@ class CVXPYEstimator(BaseEstimator):
         norm_constraint: float = 3.0,
         n_grid_points: int = 200,
         basis_order: int = 0,
-        solver: str = "ECOS", 
+        solver: str = "MOSEK",
         log_dir: Optional[str] = None,
         log_frequency: int = 10,
-        use_secondary_solver: bool = False,
+        use_secondary_solver: bool = True,
         solver_waterfall: list[str] = ["MOSEK", "CLARABEL", "ECOS", "SCS"],
     ):
         """
@@ -37,7 +38,7 @@ class CVXPYEstimator(BaseEstimator):
             tol: tol for pruning small theta coefficients
             norm_constraint: One-norm constraint for theta[1:]
             n_grid_points: Number of grid points for density evaluation
-            solver: CVXPY solver to use (default: "ECOS" for high reliability)
+            solver: CVXPY solver to use (default: "MOSEK")
         """
         super().__init__(
             tol=tol,
@@ -54,6 +55,8 @@ class CVXPYEstimator(BaseEstimator):
         self.lambda_val_lag: Optional[float] = None
         self.use_secondary_solver = use_secondary_solver
         self.solver_waterfall = solver_waterfall
+        self.solver_used_: Optional[str] = None
+        self.problem_status_: Optional[str] = None
         
     def fit(self, data: pd.DataFrame) -> 'CVXPYEstimator':
         """
@@ -105,33 +108,14 @@ class CVXPYEstimator(BaseEstimator):
         objective = cp.Minimize(loss)
         problem = cp.Problem(objective, constraints)
         
-        try:
-            problem.solve(solver=self.solver)
-        except Exception as e:
-            if not self.use_secondary_solver:
-                raise RuntimeError(f"CVXPY optimization failed: {e}")
-            if self.do_log:
-                self.logger.info(
-                    f"{self.solver} solver failed (basis_order={self.basis_order}, norm_constraint={self.norm_constraint}). "
-                    f"Trying solvers: {self.solver_waterfall}"
-                )
-            success = False
-            last_error: Optional[Exception] = None
-            for solver in self.solver_waterfall:
-                try:
-                    problem.solve(solver=solver)
-                    if self.do_log:
-                        self.logger.info(f"{solver} succeeded as primary solver")
-                    success = True
-                    break
-                except Exception as e2:
-                    last_error = e2
-                    if self.do_log:
-                        self.logger.info(f"{solver} failed: {e2}")
-            if not success:
-                raise RuntimeError(
-                    f"CVXPY optimization failed with all solvers in waterfall; last error: {last_error}"
-                )
+        solve_result = solve_cvxpy_problem(
+            problem=problem,
+            primary_solver=self.solver,
+            use_secondary_solver=self.use_secondary_solver,
+            solver_waterfall=self.solver_waterfall,
+        )
+        self.solver_used_ = solve_result.solver_used
+        self.problem_status_ = solve_result.status
 
         self.lambda_val_lag = problem.constraints[0].dual_value
         

@@ -2,9 +2,10 @@ import time
 import numpy as np
 import pandas as pd
 import cvxpy as cp
-from typing import Union, Any, Optional
+from typing import Union, Any, Optional, Sequence
 from pydantic import BaseModel
 from haldensity.utils.basis import create_basis_functions
+from haldensity.utils.cvxpy_solver import solve_cvxpy_problem
 
 
 class TargetingResults(BaseModel):
@@ -25,7 +26,14 @@ class TargetingResults(BaseModel):
 class BaseTargetLearner:
     """Shared M-step logic; subclasses only supply targeting basis constructors and variance."""
     
-    def __init__(self, norm_constraint: int = 20, basis_order: int = 0):
+    def __init__(
+        self,
+        norm_constraint: int = 20,
+        basis_order: int = 0,
+        solver: str = "MOSEK",
+        use_secondary_solver: bool = True,
+        solver_waterfall: Sequence[str] = ("CLARABEL", "ECOS", "SCS"),
+    ):
         """
         Initialize the base target learner.
         
@@ -35,9 +43,18 @@ class BaseTargetLearner:
             L1-norm constraint for the targeting coefficient(s) (default is 20).
         basis_order : int, optional
             Order of the basis functions (default is 0).
+        solver : str, optional
+            Primary CVXPY solver for the targeting M-step.
+        use_secondary_solver : bool, optional
+            Whether to use fallback solvers when the primary solver fails.
+        solver_waterfall : Sequence[str], optional
+            Ordered fallback solver list.
         """
         self.norm_constraint = norm_constraint
         self.basis_order = basis_order
+        self.solver = str(solver).upper()
+        self.use_secondary_solver = bool(use_secondary_solver)
+        self.solver_waterfall = tuple(str(name).upper() for name in solver_waterfall)
     
     def get_b_ik_targeting(self, uncensored_data: pd.DataFrame, **kwargs) -> np.ndarray:
         """Targeting basis at data points; shape (n_data, n_targeting_basis)."""
@@ -187,14 +204,13 @@ class BaseTargetLearner:
         # Warm start: initialize alpha (you may change this if you have a previous guess)
         alpha.value = np.zeros(r)
 
-        # Solve the optimization problem (here using the SCS solver)
-        try:
-            problem.solve(solver="MOSEK", warm_start=True)
-        except Exception:
-            try:
-                problem.solve(solver="ECOS", warm_start=True)
-            except Exception:
-                problem.solve(solver="SCS", warm_start=True)
+        solve_cvxpy_problem(
+            problem=problem,
+            primary_solver=self.solver,
+            use_secondary_solver=self.use_secondary_solver,
+            solver_waterfall=self.solver_waterfall,
+            build_solve_kwargs=lambda _solver_name: {"warm_start": True},
+        )
 
 
         end_time_m_optimize = time.time()

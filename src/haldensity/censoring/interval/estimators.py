@@ -17,6 +17,7 @@ import cvxpy as cp
 
 from haldensity.estimation.base_estimator import BaseEstimator
 from haldensity.utils.basis import create_basis_functions
+from haldensity.utils.cvxpy_solver import solve_cvxpy_problem
 from haldensity.censoring._defaults import EMStageResult, EM_DEFAULTS
 from haldensity.censoring._base_mle import WeightedHALMLEEstimator
 
@@ -72,10 +73,10 @@ class IntervalCensoredInitEstimator(BaseEstimator):
         norm_constraint: float = 3.0,
         n_grid_points: int = 200,
         basis_order: int = 0,
-        solver: str = "ECOS",
+        solver: str = "MOSEK",
         log_dir: Optional[str] = None,
         log_frequency: int = -1,
-        use_secondary_solver: bool = False,
+        use_secondary_solver: bool = True,
         solver_waterfall: list[str] = ["MOSEK", "CLARABEL", "ECOS", "SCS"],
         max_threads: Optional[int] = None,
         include_intercept_in_constraint: bool = False,
@@ -99,6 +100,8 @@ class IntervalCensoredInitEstimator(BaseEstimator):
         self._norm_shift: Optional[float] = None
         self._norm_Z: Optional[float] = None
         self._density_midpoints: Optional[np.ndarray] = None
+        self.solver_used_: Optional[str] = None
+        self.problem_status_: Optional[str] = None
 
     @staticmethod
     def _midpoint_impute(df: pd.DataFrame, L_col: str = "L", R_col: str = "R") -> np.ndarray:
@@ -234,41 +237,32 @@ class IntervalCensoredInitEstimator(BaseEstimator):
 
         problem = cp.Problem(cp.Minimize(loss), constraints)
 
-        warm_args = False
+        warm_start_vector: Optional[np.ndarray] = None
         if warm_start_theta is not None and len(warm_start_theta) == K:
-            theta.value = np.asarray(warm_start_theta, dtype=float).ravel()
-            warm_args = True
+            warm_start_vector = np.asarray(warm_start_theta, dtype=float).ravel()
 
-        def _solve_with_kwargs(solver_name: str, warm: bool) -> None:
-            solve_kwargs: dict[str, object] = {"solver": solver_name}
-            if solver_name.upper() == "MOSEK" and self.max_threads is not None:
+        def _build_solve_kwargs(solver_name: str) -> dict[str, Any]:
+            solve_kwargs: dict[str, Any] = {}
+            if solver_name == "MOSEK" and self.max_threads is not None:
                 solve_kwargs["mosek_params"] = {"MSK_IPAR_NUM_THREADS": int(self.max_threads)}
-            if warm:
+            if warm_start_vector is not None:
                 solve_kwargs["warm_start"] = True
-            problem.solve(**solve_kwargs)
+            return solve_kwargs
 
-        try:
-            _solve_with_kwargs(self.solver, warm_args)
-        except Exception as exc:
-            if not self.use_secondary_solver:
-                raise RuntimeError(f"CVXPY optimization failed: {exc}")
-            last_error: Optional[Exception] = None
-            success = False
-            for solver in self.solver_waterfall:
-                try:
-                    if warm_start_theta is not None and len(warm_start_theta) == K:
-                        theta.value = np.asarray(warm_start_theta, dtype=float).ravel()
-                        _solve_with_kwargs(solver, True)
-                    else:
-                        _solve_with_kwargs(solver, False)
-                    success = True
-                    break
-                except Exception as e2:
-                    last_error = e2
-            if not success:
-                raise RuntimeError(
-                    f"CVXPY optimization failed with all solvers in waterfall; last error: {last_error}"
-                )
+        def _before_attempt(_solver_name: str) -> None:
+            if warm_start_vector is not None:
+                theta.value = warm_start_vector
+
+        solve_result = solve_cvxpy_problem(
+            problem=problem,
+            primary_solver=self.solver,
+            use_secondary_solver=self.use_secondary_solver,
+            solver_waterfall=self.solver_waterfall,
+            build_solve_kwargs=_build_solve_kwargs,
+            before_attempt=_before_attempt,
+        )
+        self.solver_used_ = solve_result.solver_used
+        self.problem_status_ = solve_result.status
 
         if constraints:
             self.lambda_val_lag = float(problem.constraints[0].dual_value)
@@ -1500,7 +1494,7 @@ class IntervalCensoredEMEstimator(BaseEstimator):
             log_dir=self.log_dir,
             log_frequency=self.log_frequency,
             include_intercept_in_constraint=False,
-            use_secondary_solver=False,
+            use_secondary_solver=True,
         ).fit(data, L_col=self.L_col, R_col=self.R_col)
 
     def fit(self, data: pd.DataFrame, **kwargs: Any) -> "IntervalCensoredEMEstimator":  # type: ignore[override]

@@ -28,8 +28,8 @@ class EMDefaults(BaseModel):
     em_tol: float = 1e-1
     e_step_n_grid: int = 200
     use_sc_adjustment: bool = False
-    m_step_solver: str = "ECOS"
-    init_solver: str = "ECOS"
+    m_step_solver: str = "MOSEK"
+    init_solver: str = "MOSEK"
 
 
 class TunerDefaults(BaseModel):
@@ -43,7 +43,7 @@ class TunerDefaults(BaseModel):
     cv_folds: int = 5
     random_state: int = 42
     n_grid_points: int = 200
-    solver: str = "ECOS"
+    solver: str = "MOSEK"
     use_secondary_solver: bool = True
 
     # Conservative adjustment settings (to reduce CV oversmoothing)

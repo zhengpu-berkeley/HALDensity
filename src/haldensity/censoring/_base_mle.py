@@ -14,6 +14,7 @@ import cvxpy as cp
 
 from haldensity.estimation.base_estimator import BaseEstimator
 from haldensity.utils.basis import create_basis_functions
+from haldensity.utils.cvxpy_solver import solve_cvxpy_problem
 
 
 logger = logging.getLogger(__name__)
@@ -68,10 +69,10 @@ class WeightedHALMLEEstimator(BaseEstimator):
         norm_constraint: float = 3.0,
         n_grid_points: int = 200,
         basis_order: int = 0,
-        solver: str = "ECOS",
+        solver: str = "MOSEK",
         log_dir: Optional[str] = None,
         log_frequency: int = 10,
-        use_secondary_solver: bool = False,
+        use_secondary_solver: bool = True,
         solver_waterfall: list[str] = ["MOSEK", "CLARABEL", "ECOS", "SCS"],
         max_threads: Optional[int] = None,
         include_intercept_in_constraint: bool = False,
@@ -95,6 +96,8 @@ class WeightedHALMLEEstimator(BaseEstimator):
         self._norm_shift: Optional[float] = None
         self._norm_Z: Optional[float] = None
         self._density_midpoints: Optional[np.ndarray] = None
+        self.solver_used_: Optional[str] = None
+        self.problem_status_: Optional[str] = None
 
     def fit(  # type: ignore[override]
         self,
@@ -209,42 +212,32 @@ class WeightedHALMLEEstimator(BaseEstimator):
         problem = cp.Problem(cp.Minimize(loss), constraints)
 
         # Warm start
-        warm_args = False
+        warm_start_vector: Optional[np.ndarray] = None
         if warm_start_theta is not None and len(warm_start_theta) == K:
-            theta.value = warm_start_theta
-            warm_args = True
+            warm_start_vector = np.asarray(warm_start_theta, dtype=float).ravel()
 
-        def _solve_with_kwargs(solver_name: str, warm: bool) -> None:
-            solve_kwargs: dict[str, Any] = {"solver": solver_name}
-            if solver_name.upper() == "MOSEK" and self.max_threads is not None:
+        def _build_solve_kwargs(solver_name: str) -> dict[str, Any]:
+            solve_kwargs: dict[str, Any] = {}
+            if solver_name == "MOSEK" and self.max_threads is not None:
                 solve_kwargs["mosek_params"] = {"MSK_IPAR_NUM_THREADS": int(self.max_threads)}
-            if warm:
+            if warm_start_vector is not None:
                 solve_kwargs["warm_start"] = True
-            problem.solve(**solve_kwargs)
+            return solve_kwargs
 
-        # Solve with fallback
-        try:
-            _solve_with_kwargs(self.solver, warm_args)
-        except Exception as exc:
-            if not self.use_secondary_solver:
-                raise RuntimeError(f"CVXPY optimization failed: {exc}")
-            success = False
-            last_error: Optional[Exception] = None
-            for solver in self.solver_waterfall:
-                try:
-                    if warm_start_theta is not None and len(warm_start_theta) == K:
-                        theta.value = warm_start_theta
-                        _solve_with_kwargs(solver, True)
-                    else:
-                        _solve_with_kwargs(solver, False)
-                    success = True
-                    break
-                except Exception as e2:
-                    last_error = e2
-            if not success:
-                raise RuntimeError(
-                    f"CVXPY optimization failed with all solvers in waterfall; last error: {last_error}"
-                )
+        def _before_attempt(_solver_name: str) -> None:
+            if warm_start_vector is not None:
+                theta.value = warm_start_vector
+
+        solve_result = solve_cvxpy_problem(
+            problem=problem,
+            primary_solver=self.solver,
+            use_secondary_solver=self.use_secondary_solver,
+            solver_waterfall=self.solver_waterfall,
+            build_solve_kwargs=_build_solve_kwargs,
+            before_attempt=_before_attempt,
+        )
+        self.solver_used_ = solve_result.solver_used
+        self.problem_status_ = solve_result.status
 
         if constraints:
             self.lambda_val_lag = problem.constraints[0].dual_value
