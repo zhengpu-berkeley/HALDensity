@@ -45,9 +45,11 @@ from .right import (
     RightCensoredObservedFISTAEstimator,
     RightCensoredObservedProjectedGDEstimator,
     RightCensoredObservedFPGDEstimator,
+    RightCensoredObservedL1MLE,
     incomplete_loglik,
     mi_complete_loglik,
     ipcw_loglik,
+    right_censored_observed_loglik_and_gradient,
 )
 
 # Interval-censoring module
@@ -110,6 +112,7 @@ __all__ = [
     "incomplete_loglik_interval",
     "mi_complete_loglik",
     "ipcw_loglik",
+    "right_censored_observed_loglik_and_gradient",
     "kl_divergence",
     # Result types
     "TuningResult",
@@ -123,6 +126,7 @@ __all__ = [
     "RightCensoredObservedFISTAEstimator",
     "RightCensoredObservedProjectedGDEstimator",
     "RightCensoredObservedFPGDEstimator",
+    "RightCensoredObservedL1MLE",
     # Interval-censored estimators
     "IntervalCensoredInitEstimator",
     "IntervalCensoredEMEstimator",

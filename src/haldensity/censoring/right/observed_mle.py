@@ -13,6 +13,7 @@ augmented with the boundary points 0 and 1.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import numpy as np
@@ -40,6 +41,195 @@ def build_right_censored_knot_grid(
     d = np.asarray(data[delta_col].values, dtype=int).ravel()
     uncensored = t[d == 1]
     return np.unique(np.concatenate(([0.0], uncensored.astype(float), [1.0])))
+
+
+def _normalize_working_grid_points(working_grid_points: np.ndarray) -> np.ndarray:
+    """Return a sorted unique fixed-support grid and validate it is non-empty."""
+    working_grid = np.sort(np.unique(np.asarray(working_grid_points, dtype=float).ravel()))
+    if working_grid.size == 0:
+        raise ValueError("working_grid_points must be non-empty")
+    return working_grid
+
+
+def _expected_num_observed_params(*, basis_order: int, grid_points: np.ndarray) -> int:
+    """Return the coefficient dimension induced by a fixed HAL support."""
+    poly_cols = int(basis_order) if int(basis_order) > 0 else 0
+    return 1 + poly_cols + int(np.asarray(grid_points, dtype=float).size)
+
+
+@dataclass(frozen=True)
+class _RightCensoredObservedProblem:
+    """Cached basis evaluations used by direct observed-data optimizers."""
+
+    grid_points_hal: np.ndarray
+    basis_names: list[str]
+    b_grid: np.ndarray
+    delta_grid: np.ndarray
+    event_basis: np.ndarray
+    tail_mask: np.ndarray
+    fallback_basis: np.ndarray
+    n_samples: int
+    n_events: int
+    n_censored: int
+
+
+def _build_right_censored_observed_problem(
+    data: pd.DataFrame,
+    *,
+    n_grid_points: int,
+    basis_order: int,
+    time_col: str = "T",
+    delta_col: str = "Delta",
+    grid_points_override: Optional[np.ndarray] = None,
+) -> _RightCensoredObservedProblem:
+    """Build the cached basis objects for the observed right-censored loss."""
+    if time_col not in data.columns or delta_col not in data.columns:
+        raise ValueError(f"data must contain columns {time_col!r} and {delta_col!r}")
+
+    observed_t = np.asarray(data[time_col].values, dtype=float).ravel()
+    delta_obs = np.asarray(data[delta_col].values, dtype=int).ravel()
+    if observed_t.size == 0:
+        raise ValueError("data must be non-empty")
+    if observed_t.shape != delta_obs.shape:
+        raise ValueError("time and delta columns must have the same shape")
+
+    grid_points_hal = build_right_censored_knot_grid(
+        data,
+        time_col=time_col,
+        delta_col=delta_col,
+        grid_points_override=grid_points_override,
+    )
+    grid_eval = np.linspace(0.0, 1.0, int(n_grid_points))
+    midpoints = (grid_eval[:-1] + grid_eval[1:]) / 2.0
+    delta_grid = grid_eval[1:] - grid_eval[:-1]
+
+    df_mid = pd.DataFrame({"W1": midpoints})
+    b_grid, basis_names = create_basis_functions(
+        df_mid, grid_points_hal, order=basis_order, include_intercept=True
+    )
+
+    event_t = observed_t[delta_obs == 1]
+    if event_t.size > 0:
+        df_event = pd.DataFrame({"W1": event_t})
+        event_basis, _ = create_basis_functions(
+            df_event, grid_points_hal, order=basis_order, include_intercept=True
+        )
+    else:
+        event_basis = np.zeros((0, int(b_grid.shape[1])), dtype=float)
+
+    censored_t = observed_t[delta_obs == 0]
+    if censored_t.size > 0:
+        tail_mask = (midpoints[None, :] > censored_t[:, None]).astype(float)
+        tail_centers = np.clip(0.5 * (censored_t + 1.0), 0.0, 1.0)
+        df_tail_centers = pd.DataFrame({"W1": tail_centers})
+        fallback_basis, _ = create_basis_functions(
+            df_tail_centers, grid_points_hal, order=basis_order, include_intercept=True
+        )
+    else:
+        tail_mask = np.zeros((0, midpoints.size), dtype=float)
+        fallback_basis = np.zeros((0, int(b_grid.shape[1])), dtype=float)
+
+    return _RightCensoredObservedProblem(
+        grid_points_hal=grid_points_hal,
+        basis_names=basis_names,
+        b_grid=b_grid,
+        delta_grid=delta_grid,
+        event_basis=event_basis,
+        tail_mask=tail_mask,
+        fallback_basis=fallback_basis,
+        n_samples=int(observed_t.size),
+        n_events=int(np.sum(delta_obs == 1)),
+        n_censored=int(np.sum(delta_obs == 0)),
+    )
+
+
+def _observed_loss_and_grad(
+    theta: np.ndarray,
+    *,
+    problem: _RightCensoredObservedProblem,
+    min_tail_mass: float,
+    compute_grad: bool = True,
+) -> tuple[float, Optional[np.ndarray]]:
+    """Return observed negative log-likelihood and gradient."""
+    theta_vec = np.asarray(theta, dtype=float).ravel()
+    expected_dim = int(problem.b_grid.shape[1])
+    if theta_vec.size != expected_dim:
+        raise ValueError(
+            f"theta must have length {expected_dim} for the supplied working model; "
+            f"got {theta_vec.size}"
+        )
+
+    log_grid = problem.b_grid @ theta_vec
+    max_log_grid = float(np.max(log_grid))
+    unnormalized = np.exp(np.clip(log_grid - max_log_grid, -700, 700)) * problem.delta_grid
+    z_shifted = float(np.sum(unnormalized))
+    if z_shifted <= 0.0 or not np.isfinite(z_shifted):
+        return float("inf"), (np.zeros_like(theta_vec) if compute_grad else None)
+
+    log_normalizer = max_log_grid + float(np.log(z_shifted))
+    prob = unnormalized / z_shifted
+    global_mean = prob @ problem.b_grid
+
+    loss = 0.0
+    if problem.event_basis.shape[0] > 0:
+        event_log_density = problem.event_basis @ theta_vec - log_normalizer
+        loss -= float(np.sum(event_log_density))
+
+    censored_cond_means = np.zeros((problem.tail_mask.shape[0], problem.b_grid.shape[1]), dtype=float)
+    if problem.tail_mask.shape[0] > 0:
+        weighted_tails = problem.tail_mask * prob[None, :]
+        tail_masses = np.sum(weighted_tails, axis=1)
+        safe_tail_masses = np.maximum(tail_masses, float(min_tail_mass))
+        loss -= float(np.sum(np.log(safe_tail_masses)))
+
+        if compute_grad:
+            censored_cond_means = weighted_tails @ problem.b_grid
+            non_tiny = tail_masses > float(min_tail_mass)
+            if np.any(non_tiny):
+                censored_cond_means[non_tiny] /= tail_masses[non_tiny, None]
+            if np.any(~non_tiny):
+                censored_cond_means[~non_tiny] = problem.fallback_basis[~non_tiny]
+
+    if not compute_grad:
+        return float(loss), None
+
+    grad = problem.n_samples * global_mean
+    if problem.event_basis.shape[0] > 0:
+        grad -= np.sum(problem.event_basis, axis=0)
+    if censored_cond_means.shape[0] > 0:
+        grad -= np.sum(censored_cond_means, axis=0)
+    return float(loss), np.asarray(grad, dtype=float)
+
+
+def right_censored_observed_loglik_and_gradient(
+    theta: np.ndarray,
+    data: pd.DataFrame,
+    *,
+    working_grid_points: np.ndarray,
+    basis_order: int = 0,
+    n_grid_points: int = 400,
+    time_col: str = "T",
+    delta_col: str = "Delta",
+    min_tail_mass: float = 1e-12,
+    compute_grad: bool = True,
+) -> tuple[float, Optional[np.ndarray]]:
+    """Return observed-data log-likelihood and score for a fixed-support model."""
+    working_grid = _normalize_working_grid_points(working_grid_points)
+    problem = _build_right_censored_observed_problem(
+        data,
+        n_grid_points=n_grid_points,
+        basis_order=basis_order,
+        time_col=time_col,
+        delta_col=delta_col,
+        grid_points_override=working_grid,
+    )
+    loss, grad = _observed_loss_and_grad(
+        theta,
+        problem=problem,
+        min_tail_mass=min_tail_mass,
+        compute_grad=compute_grad,
+    )
+    return -float(loss), (None if grad is None else -np.asarray(grad, dtype=float))
 
 
 class _RightCensoredObservedBase(BaseEstimator):
@@ -73,6 +263,7 @@ class _RightCensoredObservedBase(BaseEstimator):
         self._fallback_basis: Optional[np.ndarray] = None
         self._b_grid: Optional[np.ndarray] = None
         self._delta: Optional[np.ndarray] = None
+        self._observed_problem: Optional[_RightCensoredObservedProblem] = None
         self._n_samples: int = 0
         self._n_events: int = 0
         self._n_censored: int = 0
@@ -123,66 +314,26 @@ class _RightCensoredObservedBase(BaseEstimator):
         delta_col: str,
         grid_points_override: Optional[np.ndarray],
     ) -> tuple[np.ndarray, int]:
-        if time_col not in data.columns or delta_col not in data.columns:
-            raise ValueError(f"data must contain columns {time_col!r} and {delta_col!r}")
-
-        observed_t = np.asarray(data[time_col].values, dtype=float).ravel()
-        delta_obs = np.asarray(data[delta_col].values, dtype=int).ravel()
-        if observed_t.size == 0:
-            raise ValueError("data must be non-empty")
-        if observed_t.shape != delta_obs.shape:
-            raise ValueError("time and delta columns must have the same shape")
-
-        self._n_samples = int(observed_t.size)
-        self._n_events = int(np.sum(delta_obs == 1))
-        self._n_censored = int(np.sum(delta_obs == 0))
-
-        grid_points_hal = build_right_censored_knot_grid(
+        problem = _build_right_censored_observed_problem(
             data,
+            n_grid_points=self.n_grid_points,
+            basis_order=self.basis_order,
             time_col=time_col,
             delta_col=delta_col,
             grid_points_override=grid_points_override,
         )
-        self._grid_points_hal = grid_points_hal
-
-        grid_eval = np.linspace(0.0, 1.0, int(self.n_grid_points))
-        midpoints = (grid_eval[:-1] + grid_eval[1:]) / 2.0
-        delta_grid = grid_eval[1:] - grid_eval[:-1]
-
-        df_mid = pd.DataFrame({"W1": midpoints})
-        b_grid, basis_names = create_basis_functions(
-            df_mid, grid_points_hal, order=self.basis_order, include_intercept=True
-        )
-        self.basis_names = basis_names
-
-        event_t = observed_t[delta_obs == 1]
-        if event_t.size > 0:
-            df_event = pd.DataFrame({"W1": event_t})
-            event_basis, _ = create_basis_functions(
-                df_event, grid_points_hal, order=self.basis_order, include_intercept=True
-            )
-        else:
-            event_basis = np.zeros((0, int(b_grid.shape[1])), dtype=float)
-
-        censored_t = observed_t[delta_obs == 0]
-        if censored_t.size > 0:
-            tail_mask = (midpoints[None, :] > censored_t[:, None]).astype(float)
-            tail_centers = np.clip(0.5 * (censored_t + 1.0), 0.0, 1.0)
-            df_tail_centers = pd.DataFrame({"W1": tail_centers})
-            fallback_basis, _ = create_basis_functions(
-                df_tail_centers, grid_points_hal, order=self.basis_order, include_intercept=True
-            )
-        else:
-            tail_mask = np.zeros((0, midpoints.size), dtype=float)
-            fallback_basis = np.zeros((0, int(b_grid.shape[1])), dtype=float)
-
-        self._b_grid = b_grid
-        self._delta = delta_grid
-        self._event_basis = event_basis
-        self._tail_mask = tail_mask
-        self._fallback_basis = fallback_basis
-
-        return grid_points_hal, int(b_grid.shape[1])
+        self._observed_problem = problem
+        self._grid_points_hal = problem.grid_points_hal
+        self.basis_names = list(problem.basis_names)
+        self._b_grid = problem.b_grid
+        self._delta = problem.delta_grid
+        self._event_basis = problem.event_basis
+        self._tail_mask = problem.tail_mask
+        self._fallback_basis = problem.fallback_basis
+        self._n_samples = int(problem.n_samples)
+        self._n_events = int(problem.n_events)
+        self._n_censored = int(problem.n_censored)
+        return problem.grid_points_hal, int(problem.b_grid.shape[1])
 
     def _smooth_loss_and_grad(
         self,
@@ -190,51 +341,27 @@ class _RightCensoredObservedBase(BaseEstimator):
         *,
         compute_grad: bool = True,
     ) -> tuple[float, Optional[np.ndarray]]:
-        if self._b_grid is None or self._delta is None:
+        if self._observed_problem is None:
             raise RuntimeError("Internal right-censored structures are not initialized")
-        if self._event_basis is None or self._tail_mask is None or self._fallback_basis is None:
-            raise RuntimeError("Internal right-censored structures are not initialized")
+        return _observed_loss_and_grad(
+            theta,
+            problem=self._observed_problem,
+            min_tail_mass=self.min_tail_mass,
+            compute_grad=compute_grad,
+        )
 
-        log_grid = self._b_grid @ theta
-        max_log_grid = float(np.max(log_grid))
-        unnormalized = np.exp(np.clip(log_grid - max_log_grid, -700, 700)) * self._delta
-        z_shifted = float(np.sum(unnormalized))
-        if z_shifted <= 0.0 or not np.isfinite(z_shifted):
-            return float("inf"), (np.zeros_like(theta) if compute_grad else None)
-
-        log_normalizer = max_log_grid + float(np.log(z_shifted))
-        prob = unnormalized / z_shifted
-        global_mean = prob @ self._b_grid
-
-        loss = 0.0
-        if self._event_basis.shape[0] > 0:
-            event_log_density = self._event_basis @ theta - log_normalizer
-            loss -= float(np.sum(event_log_density))
-
-        censored_cond_means = np.zeros((self._tail_mask.shape[0], self._b_grid.shape[1]), dtype=float)
-        if self._tail_mask.shape[0] > 0:
-            weighted_tails = self._tail_mask * prob[None, :]
-            tail_masses = np.sum(weighted_tails, axis=1)
-            safe_tail_masses = np.maximum(tail_masses, self.min_tail_mass)
-            loss -= float(np.sum(np.log(safe_tail_masses)))
-
-            if compute_grad:
-                censored_cond_means = weighted_tails @ self._b_grid
-                non_tiny = tail_masses > self.min_tail_mass
-                if np.any(non_tiny):
-                    censored_cond_means[non_tiny] /= tail_masses[non_tiny, None]
-                if np.any(~non_tiny):
-                    censored_cond_means[~non_tiny] = self._fallback_basis[~non_tiny]
-
-        if not compute_grad:
-            return float(loss), None
-
-        grad = self._n_samples * global_mean
-        if self._event_basis.shape[0] > 0:
-            grad -= np.sum(self._event_basis, axis=0)
-        if censored_cond_means.shape[0] > 0:
-            grad -= np.sum(censored_cond_means, axis=0)
-        return float(loss), np.asarray(grad, dtype=float)
+    def observed_loglik_and_gradient(
+        self,
+        theta: Optional[np.ndarray] = None,
+        *,
+        compute_grad: bool = True,
+    ) -> tuple[float, Optional[np.ndarray]]:
+        """Return observed-data log-likelihood and score for this working model."""
+        theta_eval = self.theta_hat if theta is None else np.asarray(theta, dtype=float).ravel()
+        if theta_eval is None:
+            raise RuntimeError("Provide theta or fit the estimator before requesting the observed score.")
+        loss, grad = self._smooth_loss_and_grad(theta_eval, compute_grad=compute_grad)
+        return -float(loss), (None if grad is None else -np.asarray(grad, dtype=float))
 
     def _finalize_fit(self, theta: np.ndarray, grid_points_hal: np.ndarray) -> None:
         self.theta_hat = np.asarray(theta, dtype=float).copy()
@@ -932,3 +1059,186 @@ class RightCensoredObservedFPGDEstimator(RightCensoredObservedProjectedGDEstimat
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         kwargs.setdefault("use_nesterov", True)
         super().__init__(*args, **kwargs)
+
+
+class RightCensoredObservedL1MLE(RightCensoredObservedProjectedGDEstimator):
+    """Fixed-support observed-data HAL-MLE with an L1 norm budget."""
+
+    def __init__(
+        self,
+        *,
+        working_grid_points: np.ndarray,
+        norm_constraint: float = 3.0,
+        basis_order: int = 0,
+        n_grid_points: int = 400,
+        learning_rate: float = 1e-1,
+        n_iterations: int = 3000,
+        ll_change_tol: float = 1e-4,
+        include_intercept_in_constraint: bool = False,
+        warm_start_theta: Optional[np.ndarray] = None,
+        tol: float = 1e-6,
+        near_zero_tol: float = 1e-8,
+        min_tail_mass: float = 1e-12,
+        max_backtracking: int = 20,
+        backtracking_factor: float = 0.5,
+        min_learning_rate: float = 1e-8,
+        recovery_shrink_factor: float = 0.2,
+        max_recovery_attempts: int = 8,
+        restart_on_objective_increase: bool = True,
+        history_every: int = 0,
+        log_dir: Optional[str] = None,
+        log_frequency: int = -1,
+    ) -> None:
+        self.working_grid_points = _normalize_working_grid_points(working_grid_points)
+        self.near_zero_tol = float(near_zero_tol)
+        self.warm_start_theta = self._validate_warm_start_theta(
+            warm_start_theta,
+            basis_order=basis_order,
+        )
+        self.penalized_l1_norm_: float = 0.0
+        self.n_near_zero_coeffs_: int = 0
+        self.n_exact_zero_coeffs_: int = 0
+        self.constraint_active_: bool = False
+        self.n_active_knot_coeffs_: int = 0
+
+        super().__init__(
+            norm_constraint=norm_constraint,
+            learning_rate=learning_rate,
+            n_iterations=n_iterations,
+            tol=tol,
+            ll_change_tol=ll_change_tol,
+            n_grid_points=n_grid_points,
+            basis_order=basis_order,
+            min_tail_mass=min_tail_mass,
+            include_intercept_in_constraint=include_intercept_in_constraint,
+            use_nesterov=True,
+            nesterov_restart=True,
+            max_backtracking=max_backtracking,
+            backtracking_factor=backtracking_factor,
+            min_learning_rate=min_learning_rate,
+            recovery_shrink_factor=recovery_shrink_factor,
+            max_recovery_attempts=max_recovery_attempts,
+            restart_on_objective_increase=restart_on_objective_increase,
+            history_every=history_every,
+            log_dir=log_dir,
+            log_frequency=log_frequency,
+        )
+
+    def _expected_n_params(self) -> int:
+        return _expected_num_observed_params(
+            basis_order=self.basis_order,
+            grid_points=self.working_grid_points,
+        )
+
+    def _validate_warm_start_theta(
+        self,
+        warm_start_theta: Optional[np.ndarray],
+        *,
+        basis_order: Optional[int] = None,
+    ) -> Optional[np.ndarray]:
+        if warm_start_theta is None:
+            return None
+        warm_start = np.asarray(warm_start_theta, dtype=float).ravel().copy()
+        order = self.basis_order if basis_order is None else int(basis_order)
+        expected = _expected_num_observed_params(
+            basis_order=order,
+            grid_points=self.working_grid_points,
+        )
+        if warm_start.size != expected:
+            raise ValueError(
+                f"warm_start_theta must have length {expected} for basis_order={order} "
+                f"and {self.working_grid_points.size} working support points; got {warm_start.size}"
+            )
+        return warm_start
+
+    def _collect_fixed_support_diagnostics(self) -> None:
+        start_idx = 0 if self.include_intercept_in_constraint else 1
+        penalized_block = self.theta_hat[start_idx:] if self.theta_hat is not None else np.array([])
+        self.penalized_l1_norm_ = (
+            float(np.sum(np.abs(penalized_block))) if penalized_block.size > 0 else 0.0
+        )
+        self.n_near_zero_coeffs_ = (
+            int(np.sum(np.abs(penalized_block) <= self.near_zero_tol))
+            if penalized_block.size > 0
+            else 0
+        )
+        self.n_exact_zero_coeffs_ = (
+            int(np.sum(penalized_block == 0.0)) if penalized_block.size > 0 else 0
+        )
+        self.constraint_active_ = bool(
+            np.isclose(
+                self.penalized_l1_norm_,
+                self.norm_constraint,
+                atol=max(1e-8, 10.0 * self.tol),
+                rtol=0.0,
+            )
+        )
+
+        poly_cols = self.basis_order if self.basis_order > 0 else 0
+        knot_start = min(self.theta_hat.size, 1 + poly_cols) if self.theta_hat is not None else 0
+        knot_block = self.theta_hat[knot_start:] if self.theta_hat is not None else np.array([])
+        self.n_active_knot_coeffs_ = (
+            int(np.sum(np.abs(knot_block) > self.tol)) if knot_block.size > 0 else 0
+        )
+
+    def fit(  # type: ignore[override]
+        self,
+        data: pd.DataFrame,
+        *,
+        time_col: str = "T",
+        delta_col: str = "Delta",
+        warm_start_theta: Optional[np.ndarray] = None,
+        **kwargs: Any,
+    ) -> "RightCensoredObservedL1MLE":
+        if "grid_points_override" in kwargs:
+            raise TypeError(
+                "RightCensoredObservedL1MLE fixes the working model via working_grid_points; "
+                "do not pass grid_points_override."
+            )
+        warm_start = self._validate_warm_start_theta(
+            self.warm_start_theta if warm_start_theta is None else warm_start_theta
+        )
+        return super().fit(
+            data,
+            time_col=time_col,
+            delta_col=delta_col,
+            grid_points_override=self.working_grid_points,
+            warm_start_theta=warm_start,
+        )
+
+    def _finalize_fit(self, theta: np.ndarray, grid_points_hal: np.ndarray) -> None:
+        self.theta_hat = np.asarray(theta, dtype=float).copy()
+        self._grid_points_hal = self.working_grid_points.copy()
+        self.grid_points_hal_selected = self.working_grid_points.copy()
+
+        n_out = int(max(self.n_grid_points, 2000)) if self.basis_order == 0 else int(self.n_grid_points)
+        output_grid = np.linspace(0.0, 1.0, n_out)
+        output_mid = (output_grid[:-1] + output_grid[1:]) / 2.0
+        delta_out = output_grid[1:] - output_grid[:-1]
+        density_out, _, max_log, norm_const = BaseEstimator.normalized_hal_density(
+            output_mid, self.theta_hat, self._grid_points_hal, self.basis_order, delta=delta_out
+        )
+
+        self._norm_shift = max_log
+        self._norm_Z = norm_const
+        self._density_midpoints = density_out
+        self.grid_midpoints = output_mid
+        self.delta_j = delta_out
+        self.grid_points = output_grid
+        self.is_fitted = True
+        self.fitted_theta_dict = {
+            name: float(value) for name, value in zip(self.basis_names, self.theta_hat)
+        }
+        self._collect_fixed_support_diagnostics()
+
+    def get_results(self) -> dict:
+        base = super().get_results()
+        base.update({
+            "working_grid_points": self.working_grid_points.copy(),
+            "penalized_l1_norm": float(self.penalized_l1_norm_),
+            "constraint_active": bool(self.constraint_active_),
+            "n_exact_zero_coeffs": int(self.n_exact_zero_coeffs_),
+            "n_near_zero_coeffs": int(self.n_near_zero_coeffs_),
+            "n_active_knot_coeffs": int(self.n_active_knot_coeffs_),
+        })
+        return base
