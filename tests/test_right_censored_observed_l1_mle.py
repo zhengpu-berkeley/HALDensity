@@ -125,6 +125,43 @@ def test_right_censored_observed_l1_keeps_full_support_when_coefficients_are_zer
     assert int(results["n_active_knot_coeffs"]) == 0
 
 
+def test_right_censored_observed_l1_allows_empty_fixed_support() -> None:
+    data = _make_data(seed=31)
+    working_grid = np.array([], dtype=float)
+    warm_start = np.array([0.0], dtype=float)
+
+    est = RightCensoredObservedL1MLE(
+        working_grid_points=working_grid,
+        norm_constraint=0.0,
+        basis_order=0,
+        n_grid_points=80,
+        learning_rate=0.1,
+        n_iterations=80,
+        ll_change_tol=1e-4,
+        include_intercept_in_constraint=False,
+        warm_start_theta=warm_start,
+    ).fit(data)
+
+    _, density = est.get_density()
+    density_mass = float(np.sum(density * est.delta_j))
+    assert np.isclose(density_mass, 1.0, atol=1e-5)
+    assert est.theta_hat.shape == (1,)
+    assert np.asarray(est._grid_points_hal, dtype=float).size == 0
+    assert np.asarray(est.grid_points_hal_selected, dtype=float).size == 0
+
+    loglik, grad = right_censored_observed_loglik_and_gradient(
+        est.theta_hat,
+        data,
+        working_grid_points=working_grid,
+        basis_order=0,
+        n_grid_points=120,
+        compute_grad=True,
+    )
+    assert np.isfinite(loglik)
+    assert grad is not None
+    assert grad.shape == (1,)
+
+
 def test_right_censored_observed_loglik_gradient_matches_finite_differences() -> None:
     data = _make_data(n=36, seed=5)
     working_grid = np.array([0.2, 0.5, 0.8], dtype=float)

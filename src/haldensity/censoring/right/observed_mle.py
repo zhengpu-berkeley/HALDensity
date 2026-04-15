@@ -31,7 +31,9 @@ def build_right_censored_knot_grid(
     grid_points_override: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """Build the Stage 1-style HAL knot grid for right-censored data."""
-    if grid_points_override is not None and len(grid_points_override) > 0:
+    if grid_points_override is not None:
+        # An explicit override fixes the working support, including the empty
+        # intercept/polynomial-only case after Stage 1 selects no knots.
         return np.sort(np.unique(np.asarray(grid_points_override, dtype=float)))
 
     if time_col not in data.columns or delta_col not in data.columns:
@@ -44,11 +46,8 @@ def build_right_censored_knot_grid(
 
 
 def _normalize_working_grid_points(working_grid_points: np.ndarray) -> np.ndarray:
-    """Return a sorted unique fixed-support grid and validate it is non-empty."""
-    working_grid = np.sort(np.unique(np.asarray(working_grid_points, dtype=float).ravel()))
-    if working_grid.size == 0:
-        raise ValueError("working_grid_points must be non-empty")
-    return working_grid
+    """Return a sorted unique fixed-support grid, allowing an empty support."""
+    return np.sort(np.unique(np.asarray(working_grid_points, dtype=float).ravel()))
 
 
 def _expected_num_observed_params(*, basis_order: int, grid_points: np.ndarray) -> int:
