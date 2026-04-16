@@ -22,6 +22,7 @@ from haldensity.censoring.right.estimators import (
 from haldensity.censoring.right.observed_mle import (
     RightCensoredObservedFISTAEstimator,
     RightCensoredObservedFPGDEstimator,
+    RightCensoredObservedL1MLE,
 )
 from haldensity.censoring.right.km import KaplanMeier
 from haldensity.censoring.right.weights import compute_ipcw_weights
@@ -33,6 +34,35 @@ from ._base import (
     BaseCVOversmoothEMTuner,
     TuningResult,
 )
+
+
+def _compress_right_theta_to_support(
+    estimator: Any,
+    support: np.ndarray,
+) -> np.ndarray:
+    """Project a fitted right-censored theta onto a target support."""
+    support = np.asarray(support, dtype=float)
+    all_knots = np.asarray(estimator._grid_points_hal, dtype=float)
+    theta_full = np.asarray(estimator.theta_hat, dtype=float)
+    basis_order = int(estimator.basis_order)
+    poly_cols = basis_order if basis_order > 0 else 0
+    knot_start = 1 + poly_cols
+
+    theta_selected = np.zeros(knot_start + support.size, dtype=float)
+    theta_selected[:knot_start] = theta_full[:knot_start]
+    for i, knot in enumerate(support):
+        idx = np.where(np.isclose(all_knots, knot, atol=1e-10, rtol=0.0))[0]
+        if idx.size > 0:
+            theta_selected[knot_start + i] = theta_full[knot_start + int(idx[0])]
+    return theta_selected
+
+
+def _compress_right_theta_to_selected_support(estimator: Any) -> np.ndarray:
+    """Project a fitted Stage-1 theta onto its selected fixed support."""
+    return _compress_right_theta_to_support(
+        estimator,
+        np.asarray(estimator.grid_points_hal_selected, dtype=float),
+    )
 
 
 class RightCensoredInitTuner(BaseCensoredInitTuner):
@@ -670,6 +700,238 @@ class RightCensoredObservedFPGDTuner:
             "study": self.study,
             "cv_folds": self.cv_folds,
             "validation_metric": "observed_loglik",
+        }
+        return TuningResult(
+            estimator=estimator,
+            best_params=self.best_params,
+            metadata=metadata,
+        )
+
+
+class RightCensoredObservedL1Tuner:
+    """Optuna CV tuner for fixed-support right-censored observed-data L1 HAL-MLE.
+
+    The working model is fixed to the selected Stage-1 support provided by
+    ``stage1_estimator``. Cross-validation tunes only a scalar multiplier
+    applied to the Stage-1 norm constraint. The final refit can warm-start
+    from the full-data Stage-1 estimator, while the CV folds can optionally
+    warm-start from fold-local IPCW Stage-1 fits projected onto the same
+    fixed support.
+    """
+
+    def __init__(
+        self,
+        data: pd.DataFrame,
+        stage1_estimator: Any,
+        cv_folds: int = TUNER_DEFAULTS.cv_folds,
+        random_state: int = TUNER_DEFAULTS.random_state,
+        norm_constraint_factors: Optional[list[float]] = None,
+        silent: bool = True,
+        time_col: str = "T",
+        delta_col: str = "Delta",
+        warm_start_final: bool = True,
+        warm_start_cv: bool = True,
+        l1_kwargs: Optional[Dict[str, Any]] = None,
+    ):
+        self.data = data.reset_index(drop=True)
+        self.stage1_estimator = stage1_estimator
+        self.cv_folds = int(cv_folds)
+        self.random_state = int(random_state)
+        self.silent = bool(silent)
+        self.time_col = str(time_col)
+        self.delta_col = str(delta_col)
+        self.warm_start_final = bool(warm_start_final)
+        self.warm_start_cv = bool(warm_start_cv)
+        self.l1_kwargs = dict(l1_kwargs or {})
+
+        forbidden = {"working_grid_points", "norm_constraint", "basis_order", "warm_start_theta"}
+        overlap = forbidden.intersection(self.l1_kwargs)
+        if overlap:
+            bad = ", ".join(sorted(overlap))
+            raise ValueError(
+                "l1_kwargs must not override fixed-support tuner arguments; "
+                f"remove: {bad}"
+            )
+
+        self.base_norm_constraint = float(getattr(
+            stage1_estimator, "norm_constraint",
+            getattr(stage1_estimator, "_norm_constraint", 100.0),
+        ))
+        self.basis_order = int(stage1_estimator.basis_order)
+        self.working_grid_points = np.asarray(
+            stage1_estimator.grid_points_hal_selected,
+            dtype=float,
+        ).copy()
+        self.init_tol = float(getattr(stage1_estimator, "tol", EM_DEFAULTS.tol))
+        self.init_n_grid_points = int(
+            getattr(stage1_estimator, "n_grid_points", TUNER_DEFAULTS.n_grid_points)
+        )
+        self.init_solver = str(getattr(stage1_estimator, "solver", TUNER_DEFAULTS.solver))
+        self.init_use_secondary_solver = bool(
+            getattr(stage1_estimator, "use_secondary_solver", TUNER_DEFAULTS.use_secondary_solver)
+        )
+        self.init_include_intercept_in_constraint = bool(
+            getattr(stage1_estimator, "include_intercept_in_constraint", False)
+        )
+        self.final_warm_start_theta = (
+            _compress_right_theta_to_selected_support(stage1_estimator)
+            if self.warm_start_final
+            else None
+        )
+        self.norm_constraint_factors = (
+            [1.0, 2.0]
+            if norm_constraint_factors is None
+            else sorted({float(x) for x in norm_constraint_factors})
+        )
+        if len(self.norm_constraint_factors) == 0:
+            raise ValueError("norm_constraint_factors must contain at least one value")
+        if any(x <= 0.0 for x in self.norm_constraint_factors):
+            raise ValueError("norm_constraint_factors must be positive")
+
+        self.kfold = KFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state)
+        self._fold_splits = [
+            (train_idx.copy(), val_idx.copy())
+            for train_idx, val_idx in self.kfold.split(self.data)
+        ]
+        self._cv_fold_warm_start_cache: Dict[int, Optional[np.ndarray]] = {}
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+
+        self.study: Optional[optuna.Study] = None
+        self.best_params: Optional[Dict[str, Any]] = None
+        self.best_metric_value: Optional[float] = None
+
+    @staticmethod
+    def _range_from_values(values: list[float]) -> Tuple[float, float]:
+        lo = float(min(values))
+        hi = float(max(values))
+        return lo, hi
+
+    def _suggest_factor(self, trial: optuna.Trial) -> float:
+        lo, hi = self._range_from_values(self.norm_constraint_factors)
+        if np.isclose(lo, hi):
+            return float(lo)
+        return float(trial.suggest_float("norm_constraint_factor", lo, hi))
+
+    def _build_fold_warm_start_theta(self, train_df: pd.DataFrame) -> Optional[np.ndarray]:
+        """Fit a fold-local IPCW initializer and project it to the fixed support."""
+        t_vals = np.asarray(train_df[self.time_col].values, dtype=float)
+        delta_vals = np.asarray(train_df[self.delta_col].values, dtype=int)
+        unc_mask = delta_vals == 1
+        if not np.any(unc_mask):
+            return None
+
+        km = KaplanMeier().fit(train_df, time_col=self.time_col, delta_col=self.delta_col)
+        weights = compute_ipcw_weights(
+            t_vals,
+            delta_vals,
+            lambda t: np.atleast_1d(km.predict(t)),
+        )
+
+        init_est = RightCensoredInitEstimator(
+            tol=self.init_tol,
+            norm_constraint=self.base_norm_constraint,
+            n_grid_points=self.init_n_grid_points,
+            basis_order=self.basis_order,
+            solver=self.init_solver,
+            use_secondary_solver=self.init_use_secondary_solver,
+            include_intercept_in_constraint=self.init_include_intercept_in_constraint,
+        )
+        init_est.fit(
+            pd.DataFrame({"W1": t_vals[unc_mask]}),
+            sample_weights=weights[unc_mask],
+            grid_points_override=self.working_grid_points,
+            skip_coefficient_pruning=True,
+        )
+        if init_est.theta_hat is None:
+            return None
+        return _compress_right_theta_to_support(init_est, self.working_grid_points)
+
+    def _get_fold_warm_start_theta(
+        self,
+        fold_idx: int,
+        train_df: pd.DataFrame,
+    ) -> Optional[np.ndarray]:
+        """Return a cached fold-local warm start, falling back to cold if needed."""
+        if not self.warm_start_cv:
+            return None
+        if fold_idx not in self._cv_fold_warm_start_cache:
+            try:
+                self._cv_fold_warm_start_cache[fold_idx] = self._build_fold_warm_start_theta(train_df)
+            except Exception:
+                # Keep CV robust: if the auxiliary IPCW initializer fails on a fold,
+                # the observed-L1 refit can still proceed from a cold start.
+                self._cv_fold_warm_start_cache[fold_idx] = None
+        warm_start = self._cv_fold_warm_start_cache[fold_idx]
+        return None if warm_start is None else np.asarray(warm_start, dtype=float).copy()
+
+    def _evaluate_fold(
+        self,
+        train_df: pd.DataFrame,
+        val_df: pd.DataFrame,
+        factor: float,
+        *,
+        fold_idx: int,
+    ) -> float:
+        warm_start = self._get_fold_warm_start_theta(fold_idx, train_df)
+        est = RightCensoredObservedL1MLE(
+            working_grid_points=self.working_grid_points,
+            norm_constraint=float(factor) * self.base_norm_constraint,
+            basis_order=self.basis_order,
+            warm_start_theta=warm_start,
+            **self.l1_kwargs,
+        )
+        est.fit(train_df, time_col=self.time_col, delta_col=self.delta_col)
+        return incomplete_loglik(est, val_df, time_col=self.time_col, delta_col=self.delta_col)
+
+    def _objective(self, trial: optuna.Trial) -> float:
+        factor = self._suggest_factor(trial)
+        scores: list[float] = []
+        for fold_idx, (train_idx, val_idx) in enumerate(self._fold_splits):
+            train_df = self.data.iloc[train_idx].reset_index(drop=True)
+            val_df = self.data.iloc[val_idx].reset_index(drop=True)
+            try:
+                score = self._evaluate_fold(train_df, val_df, factor, fold_idx=fold_idx)
+                scores.append(score)
+            except Exception:
+                scores.append(float("-inf"))
+        mean_score = float(np.mean(scores))
+        return -mean_score if np.isfinite(mean_score) else float("inf")
+
+    def optimize(self, n_trials: int = 30) -> TuningResult:
+        sampler = optuna.samplers.TPESampler(seed=self.random_state)
+        self.study = optuna.create_study(direction="minimize", sampler=sampler)
+        self.study.optimize(self._objective, n_trials=int(n_trials), show_progress_bar=(not self.silent))
+
+        best_factor = float(self.study.best_params["norm_constraint_factor"]) if "norm_constraint_factor" in self.study.best_params else float(self.norm_constraint_factors[0])
+        best_norm_constraint = best_factor * self.base_norm_constraint
+        self.best_params = {
+            "norm_constraint_factor": best_factor,
+            "norm_constraint": float(best_norm_constraint),
+        }
+        self.best_metric_value = -float(self.study.best_value)
+
+        estimator = RightCensoredObservedL1MLE(
+            working_grid_points=self.working_grid_points,
+            norm_constraint=float(best_norm_constraint),
+            basis_order=self.basis_order,
+            warm_start_theta=self.final_warm_start_theta,
+            **self.l1_kwargs,
+        )
+        estimator.fit(self.data, time_col=self.time_col, delta_col=self.delta_col)
+
+        metadata = {
+            "best_metric_value": self.best_metric_value,
+            "study": self.study,
+            "cv_folds": self.cv_folds,
+            "validation_metric": "observed_loglik",
+            "working_support_size": int(self.working_grid_points.size),
+            "base_norm_constraint": float(self.base_norm_constraint),
+            "warm_start_final": bool(self.warm_start_final),
+            "warm_start_cv": bool(self.warm_start_cv),
+            "n_cv_fold_warm_starts": int(
+                sum(theta is not None for theta in self._cv_fold_warm_start_cache.values())
+            ),
+            "n_trials": int(n_trials),
         }
         return TuningResult(
             estimator=estimator,
