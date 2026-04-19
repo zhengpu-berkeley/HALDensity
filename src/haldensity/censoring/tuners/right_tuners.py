@@ -8,6 +8,7 @@ Provides:
 
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, Optional, Tuple
 import numpy as np
 import pandas as pd
@@ -709,14 +710,13 @@ class RightCensoredObservedFPGDTuner:
 
 
 class RightCensoredObservedL1Tuner:
-    """Optuna CV tuner for fixed-support right-censored observed-data L1 HAL-MLE.
+    """Deterministic pathwise CV tuner for fixed-support observed-data L1 HAL-MLE.
 
     The working model is fixed to the selected Stage-1 support provided by
-    ``stage1_estimator``. Cross-validation tunes only a scalar multiplier
-    applied to the Stage-1 norm constraint. The final refit can warm-start
-    from the full-data Stage-1 estimator, while the CV folds can optionally
-    warm-start from fold-local IPCW Stage-1 fits projected onto the same
-    fixed support.
+    ``stage1_estimator``. Cross-validation tunes a scalar multiplier applied to
+    the Stage-1 norm constraint over a deterministic path, using the Stage-1
+    fit as the natural warm start near ``1.0 * M1`` and then continuing along
+    the path with observed-data warm starts.
     """
 
     def __init__(
@@ -778,15 +778,7 @@ class RightCensoredObservedL1Tuner:
             if self.warm_start_final
             else None
         )
-        self.norm_constraint_factors = (
-            [1.0, 2.0]
-            if norm_constraint_factors is None
-            else sorted({float(x) for x in norm_constraint_factors})
-        )
-        if len(self.norm_constraint_factors) == 0:
-            raise ValueError("norm_constraint_factors must contain at least one value")
-        if any(x <= 0.0 for x in self.norm_constraint_factors):
-            raise ValueError("norm_constraint_factors must be positive")
+        self.norm_constraint_factors = self._normalize_requested_factors(norm_constraint_factors)
 
         self.kfold = KFold(n_splits=self.cv_folds, shuffle=True, random_state=self.random_state)
         self._fold_splits = [
@@ -794,23 +786,108 @@ class RightCensoredObservedL1Tuner:
             for train_idx, val_idx in self.kfold.split(self.data)
         ]
         self._cv_fold_warm_start_cache: Dict[int, Optional[np.ndarray]] = {}
-        optuna.logging.set_verbosity(optuna.logging.WARNING)
-
         self.study: Optional[optuna.Study] = None
         self.best_params: Optional[Dict[str, Any]] = None
         self.best_metric_value: Optional[float] = None
+        self.path_factors_: Optional[list[float]] = None
+        self.path_anchor_factor_: Optional[float] = None
 
     @staticmethod
-    def _range_from_values(values: list[float]) -> Tuple[float, float]:
-        lo = float(min(values))
-        hi = float(max(values))
-        return lo, hi
+    def _default_factor_grid() -> list[float]:
+        return [float(x) for x in np.round(np.linspace(1.0, 2.0, 11), 2)]
 
-    def _suggest_factor(self, trial: optuna.Trial) -> float:
-        lo, hi = self._range_from_values(self.norm_constraint_factors)
-        if np.isclose(lo, hi):
-            return float(lo)
-        return float(trial.suggest_float("norm_constraint_factor", lo, hi))
+    @classmethod
+    def _normalize_requested_factors(
+        cls,
+        values: Optional[list[float]],
+    ) -> list[float]:
+        factors = cls._default_factor_grid() if values is None else [float(x) for x in values]
+        if len(factors) == 0:
+            raise ValueError("norm_constraint_factors must contain at least one value")
+        if any(x <= 0.0 for x in factors):
+            raise ValueError("norm_constraint_factors must be positive")
+        return sorted({float(x) for x in factors})
+
+    @staticmethod
+    def _ensure_anchor_factor(values: list[float]) -> list[float]:
+        factors = sorted({float(x) for x in values})
+        if len(factors) == 0:
+            raise ValueError("norm_constraint_factors must contain at least one value")
+        if factors[0] < 1.0 < factors[-1] and not any(np.isclose(x, 1.0) for x in factors):
+            factors.append(1.0)
+            factors = sorted({float(x) for x in factors})
+        return factors
+
+    def _resolve_path_factors(self, n_trials: Optional[int]) -> list[float]:
+        factors = list(self.norm_constraint_factors)
+        if len(factors) == 2 and n_trials is not None and int(n_trials) >= 2:
+            lo = float(min(factors))
+            hi = float(max(factors))
+            factors = [float(x) for x in np.linspace(lo, hi, int(n_trials))]
+        return self._ensure_anchor_factor(factors)
+
+    @staticmethod
+    def _build_path_sequence(
+        factors: list[float],
+    ) -> Tuple[float, list[float], list[float]]:
+        ordered = sorted({float(x) for x in factors})
+        if len(ordered) == 0:
+            raise ValueError("At least one norm-constraint factor is required")
+        exact_anchor = [x for x in ordered if np.isclose(x, 1.0)]
+        if exact_anchor:
+            anchor = float(exact_anchor[0])
+        else:
+            anchor = float(min(ordered, key=lambda x: (abs(x - 1.0), x)))
+        upward = [float(x) for x in ordered if x > anchor and not np.isclose(x, anchor)]
+        downward = [float(x) for x in ordered if x < anchor and not np.isclose(x, anchor)]
+        downward.reverse()
+        return anchor, upward, downward
+
+    @staticmethod
+    def _summarize_path_records(path_df: pd.DataFrame) -> pd.DataFrame:
+        rows: list[dict[str, Any]] = []
+        for factor, group in path_df.groupby("norm_constraint_factor", sort=True):
+            scores = group["validation_score"].to_numpy(dtype=float)
+            valid_scores = scores[np.isfinite(scores)]
+            runtimes = group["runtime_seconds"].to_numpy(dtype=float)
+            runtimes = runtimes[np.isfinite(runtimes)]
+            fit_iterations = group["n_iterations_run"].to_numpy(dtype=float)
+            fit_iterations = fit_iterations[np.isfinite(fit_iterations)]
+            converged = group["converged"].to_numpy(dtype=float)
+            converged = converged[np.isfinite(converged)]
+            learning_rates = group["final_learning_rate"].to_numpy(dtype=float)
+            learning_rates = learning_rates[np.isfinite(learning_rates)]
+            recovery = group["recovery_count"].to_numpy(dtype=float)
+            recovery = recovery[np.isfinite(recovery)]
+            rows.append({
+                "norm_constraint_factor": float(factor),
+                "norm_constraint": float(group["norm_constraint"].iloc[0]),
+                "mean_cv_loglik": float(np.mean(valid_scores)) if valid_scores.size else float("-inf"),
+                "sd_cv_loglik": (
+                    float(np.std(valid_scores, ddof=1)) if valid_scores.size >= 2 else 0.0
+                ),
+                "n_valid_folds": int(valid_scores.size),
+                "mean_runtime_seconds": float(np.mean(runtimes)) if runtimes.size else float("nan"),
+                "mean_fit_iterations": (
+                    float(np.mean(fit_iterations)) if fit_iterations.size else float("nan")
+                ),
+                "convergence_rate": float(np.mean(converged)) if converged.size else float("nan"),
+                "mean_final_learning_rate": (
+                    float(np.mean(learning_rates)) if learning_rates.size else float("nan")
+                ),
+                "mean_recovery_count": float(np.mean(recovery)) if recovery.size else float("nan"),
+            })
+        return pd.DataFrame(rows).sort_values("norm_constraint_factor").reset_index(drop=True)
+
+    @staticmethod
+    def _select_best_path_row(path_df: pd.DataFrame) -> pd.Series:
+        valid = path_df[np.isfinite(path_df["mean_cv_loglik"])].copy()
+        if valid.empty:
+            raise RuntimeError("No finite CVL1 path values were produced")
+        return valid.sort_values(
+            ["mean_cv_loglik", "norm_constraint_factor"],
+            ascending=[False, True],
+        ).iloc[0]
 
     def _build_fold_warm_start_theta(self, train_df: pd.DataFrame) -> Optional[np.ndarray]:
         """Fit a fold-local IPCW initializer and project it to the fixed support."""
@@ -858,70 +935,169 @@ class RightCensoredObservedL1Tuner:
             try:
                 self._cv_fold_warm_start_cache[fold_idx] = self._build_fold_warm_start_theta(train_df)
             except Exception:
-                # Keep CV robust: if the auxiliary IPCW initializer fails on a fold,
-                # the observed-L1 refit can still proceed from a cold start.
                 self._cv_fold_warm_start_cache[fold_idx] = None
         warm_start = self._cv_fold_warm_start_cache[fold_idx]
         return None if warm_start is None else np.asarray(warm_start, dtype=float).copy()
 
-    def _evaluate_fold(
+    def _fit_factor(
         self,
-        train_df: pd.DataFrame,
-        val_df: pd.DataFrame,
+        fit_df: pd.DataFrame,
         factor: float,
         *,
-        fold_idx: int,
-    ) -> float:
-        warm_start = self._get_fold_warm_start_theta(fold_idx, train_df)
+        warm_start_theta: Optional[np.ndarray],
+    ) -> Tuple[RightCensoredObservedL1MLE, dict[str, Any], float]:
         est = RightCensoredObservedL1MLE(
             working_grid_points=self.working_grid_points,
             norm_constraint=float(factor) * self.base_norm_constraint,
             basis_order=self.basis_order,
-            warm_start_theta=warm_start,
+            warm_start_theta=warm_start_theta,
             **self.l1_kwargs,
         )
-        est.fit(train_df, time_col=self.time_col, delta_col=self.delta_col)
-        return incomplete_loglik(est, val_df, time_col=self.time_col, delta_col=self.delta_col)
+        tic = time.perf_counter()
+        est.fit(fit_df, time_col=self.time_col, delta_col=self.delta_col)
+        runtime_seconds = float(time.perf_counter() - tic)
+        return est, est.get_results(), runtime_seconds
 
-    def _objective(self, trial: optuna.Trial) -> float:
-        factor = self._suggest_factor(trial)
-        scores: list[float] = []
+    def _evaluate_factor_path(
+        self,
+        fit_df: pd.DataFrame,
+        *,
+        warm_start_theta: Optional[np.ndarray],
+        score_df: Optional[pd.DataFrame] = None,
+        fold_idx: Optional[int] = None,
+    ) -> Tuple[pd.DataFrame, Dict[float, RightCensoredObservedL1MLE]]:
+        if self.path_factors_ is None or self.path_anchor_factor_ is None:
+            raise RuntimeError("Path factors must be resolved before evaluation")
+
+        anchor_factor, upward_factors, downward_factors = self._build_path_sequence(self.path_factors_)
+        rows: list[dict[str, Any]] = []
+        estimators: Dict[float, RightCensoredObservedL1MLE] = {}
+
+        def run_one_factor(
+            factor: float,
+            branch: str,
+            step_index: int,
+            start_theta: Optional[np.ndarray],
+        ) -> Optional[np.ndarray]:
+            norm_constraint = float(factor) * self.base_norm_constraint
+            try:
+                estimator, results, runtime_seconds = self._fit_factor(
+                    fit_df,
+                    factor,
+                    warm_start_theta=start_theta,
+                )
+                estimators[float(factor)] = estimator
+                validation_score = float("nan")
+                if score_df is not None:
+                    validation_score = float(
+                        incomplete_loglik(
+                            estimator,
+                            score_df,
+                            time_col=self.time_col,
+                            delta_col=self.delta_col,
+                        )
+                    )
+                rows.append({
+                    "fold_idx": int(fold_idx) if fold_idx is not None else -1,
+                    "norm_constraint_factor": float(factor),
+                    "norm_constraint": float(norm_constraint),
+                    "path_branch": str(branch),
+                    "path_step": int(step_index),
+                    "validation_score": validation_score,
+                    "runtime_seconds": float(runtime_seconds),
+                    "n_iterations_run": float(results["n_iterations_run"]),
+                    "converged": float(results["converged"]),
+                    "final_learning_rate": float(results["final_learning_rate"]),
+                    "recovery_count": float(results["recovery_count"]),
+                })
+                return np.asarray(estimator.theta_hat, dtype=float).copy()
+            except Exception:
+                rows.append({
+                    "fold_idx": int(fold_idx) if fold_idx is not None else -1,
+                    "norm_constraint_factor": float(factor),
+                    "norm_constraint": float(norm_constraint),
+                    "path_branch": str(branch),
+                    "path_step": int(step_index),
+                    "validation_score": float("-inf") if score_df is not None else float("nan"),
+                    "runtime_seconds": float("nan"),
+                    "n_iterations_run": float("nan"),
+                    "converged": float("nan"),
+                    "final_learning_rate": float("nan"),
+                    "recovery_count": float("nan"),
+                })
+                return None
+
+        anchor_theta = run_one_factor(
+            anchor_factor,
+            "anchor",
+            0,
+            None if warm_start_theta is None else np.asarray(warm_start_theta, dtype=float).copy(),
+        )
+
+        prev_theta = None if anchor_theta is None else anchor_theta.copy()
+        for step_index, factor in enumerate(upward_factors, start=1):
+            next_theta = run_one_factor(factor, "up", step_index, prev_theta)
+            if next_theta is not None:
+                prev_theta = next_theta
+
+        prev_theta = None if anchor_theta is None else anchor_theta.copy()
+        for step_index, factor in enumerate(downward_factors, start=1):
+            next_theta = run_one_factor(factor, "down", step_index, prev_theta)
+            if next_theta is not None:
+                prev_theta = next_theta
+
+        path_df = pd.DataFrame(rows)
+        if not path_df.empty:
+            branch_order = {"anchor": 0, "up": 1, "down": 2}
+            path_df["_branch_order"] = path_df["path_branch"].map(branch_order).astype(int)
+            path_df = path_df.sort_values(
+                ["path_step", "_branch_order", "norm_constraint_factor"],
+                ascending=[True, True, True],
+            ).drop(columns="_branch_order").reset_index(drop=True)
+        return path_df, estimators
+
+    def optimize(self, n_trials: Optional[int] = None) -> TuningResult:
+        self.path_factors_ = self._resolve_path_factors(n_trials)
+        self.path_anchor_factor_, _, _ = self._build_path_sequence(self.path_factors_)
+
+        fold_path_frames: list[pd.DataFrame] = []
         for fold_idx, (train_idx, val_idx) in enumerate(self._fold_splits):
             train_df = self.data.iloc[train_idx].reset_index(drop=True)
             val_df = self.data.iloc[val_idx].reset_index(drop=True)
-            try:
-                score = self._evaluate_fold(train_df, val_df, factor, fold_idx=fold_idx)
-                scores.append(score)
-            except Exception:
-                scores.append(float("-inf"))
-        mean_score = float(np.mean(scores))
-        return -mean_score if np.isfinite(mean_score) else float("inf")
+            warm_start = self._get_fold_warm_start_theta(fold_idx, train_df)
+            fold_path_df, _ = self._evaluate_factor_path(
+                train_df,
+                warm_start_theta=warm_start,
+                score_df=val_df,
+                fold_idx=fold_idx,
+            )
+            fold_path_frames.append(fold_path_df)
 
-    def optimize(self, n_trials: int = 30) -> TuningResult:
-        sampler = optuna.samplers.TPESampler(seed=self.random_state)
-        self.study = optuna.create_study(direction="minimize", sampler=sampler)
-        self.study.optimize(self._objective, n_trials=int(n_trials), show_progress_bar=(not self.silent))
-
-        best_factor = float(self.study.best_params["norm_constraint_factor"]) if "norm_constraint_factor" in self.study.best_params else float(self.norm_constraint_factors[0])
+        cv_fold_df = (
+            pd.concat(fold_path_frames, ignore_index=True)
+            if fold_path_frames
+            else pd.DataFrame()
+        )
+        cv_path_df = self._summarize_path_records(cv_fold_df)
+        best_row = self._select_best_path_row(cv_path_df)
+        best_factor = float(best_row["norm_constraint_factor"])
         best_norm_constraint = best_factor * self.base_norm_constraint
         self.best_params = {
             "norm_constraint_factor": best_factor,
             "norm_constraint": float(best_norm_constraint),
         }
-        self.best_metric_value = -float(self.study.best_value)
+        self.best_metric_value = float(best_row["mean_cv_loglik"])
 
-        estimator = RightCensoredObservedL1MLE(
-            working_grid_points=self.working_grid_points,
-            norm_constraint=float(best_norm_constraint),
-            basis_order=self.basis_order,
+        full_path_df, full_estimators = self._evaluate_factor_path(
+            self.data,
             warm_start_theta=self.final_warm_start_theta,
-            **self.l1_kwargs,
         )
-        estimator.fit(self.data, time_col=self.time_col, delta_col=self.delta_col)
+        if best_factor not in full_estimators:
+            raise RuntimeError("Failed to recover the selected full-data CVL1MLE estimator")
+        estimator = full_estimators[best_factor]
 
         metadata = {
             "best_metric_value": self.best_metric_value,
-            "study": self.study,
             "cv_folds": self.cv_folds,
             "validation_metric": "observed_loglik",
             "working_support_size": int(self.working_grid_points.size),
@@ -931,7 +1107,14 @@ class RightCensoredObservedL1Tuner:
             "n_cv_fold_warm_starts": int(
                 sum(theta is not None for theta in self._cv_fold_warm_start_cache.values())
             ),
-            "n_trials": int(n_trials),
+            "path_anchor_factor": float(self.path_anchor_factor_),
+            "requested_norm_constraint_factors": list(self.norm_constraint_factors),
+            "resolved_norm_constraint_factors": list(self.path_factors_),
+            "n_path_points": int(len(self.path_factors_)),
+            "optimize_n_trials_argument": None if n_trials is None else int(n_trials),
+            "cv_fold_path": cv_fold_df,
+            "cv_path_summary": cv_path_df,
+            "full_path": full_path_df,
         }
         return TuningResult(
             estimator=estimator,
