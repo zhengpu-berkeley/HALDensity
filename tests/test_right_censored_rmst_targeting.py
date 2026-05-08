@@ -9,6 +9,7 @@ from haldensity.targeting import (
     right_censored_rmst_estimand_variance,
     right_censored_rmst_targeting_M_step,
 )
+from haldensity.targeting.right_censored_mean.learner import _compute_mean_direction_on_grid
 from haldensity.targeting.right_censored_rmst.learner import _compute_rmst_direction_on_grid
 from haldensity.targeting.right_censored_survival.learner import (
     RCCensoringCache,
@@ -92,6 +93,22 @@ def test_right_censored_rmst_targeting_exports_and_shape():
     assert np.all(summary["rmst_init"].to_numpy(dtype=float) > 0.0)
     assert np.all(summary["rmst_final"].to_numpy(dtype=float) > 0.0)
     assert np.all(np.isfinite(summary["standard_error"].to_numpy(dtype=float)))
+    assert np.allclose(
+        summary["exact_eif_mean_initial_stage"].to_numpy(dtype=float),
+        summary["eif_mean_initial_stage"].to_numpy(dtype=float),
+    )
+    assert np.allclose(
+        summary["exact_threshold_initial"].to_numpy(dtype=float),
+        summary["threshold_initial"].to_numpy(dtype=float),
+    )
+    assert np.allclose(
+        summary["exact_eif_mean_final"].to_numpy(dtype=float),
+        summary["eif_mean_final"].to_numpy(dtype=float),
+    )
+    assert np.allclose(
+        summary["exact_threshold_final"].to_numpy(dtype=float),
+        summary["threshold_final"].to_numpy(dtype=float),
+    )
 
     variances = right_censored_rmst_estimand_variance(targeted, observed_data=data)
     assert variances.shape == (3,)
@@ -131,11 +148,100 @@ def test_rmst_direction_no_censoring_reduces_to_centered_bounded_mean_gradient()
         targeting_gbar_floor=1e-6,
     )
 
-    expected_raw = np.array([0.25, 0.5])
-    expected_centered = expected_raw - 0.375
+    expected_raw = np.array([0.25, 0.5]) - 0.375
+    expected_centered = expected_raw
     assert np.allclose(raw_direction, expected_raw)
     assert np.allclose(centered_direction, expected_centered)
     assert np.isclose(details["psi"], 0.375)
+
+
+def test_rmst_direction_generic_form_accounts_for_post_tau_censoring_jump():
+    grid = np.array([0.25, 0.75])
+    delta_j = np.array([0.5, 0.5])
+    density = np.array([1.0, 1.0])
+    survival = np.array([1.0, 0.5])
+    target_grid = RCTargetGrid(
+        t0=float("nan"),
+        grid_edges=np.array([0.0, 0.5, 1.0]),
+        grid_midpoints=grid,
+        delta_j=delta_j,
+        density_grid=density,
+        log_density_grid=np.log(density),
+        survival_grid=survival,
+        edge_survival=np.array([1.0, 0.5, 0.0]),
+        t0_inserted=False,
+    )
+    cache = RCCensoringCache(
+        km=_FakeKM(np.array([0.6]), np.array([0.8])),
+        jump_times=np.array([0.6]),
+        gbar_right=np.array([0.8]),
+        gbar_left=np.array([1.0]),
+        jump_masses=np.array([0.2]),
+        clip=1e-6,
+    )
+
+    raw_direction, _, details = _compute_rmst_direction_on_grid(
+        target_grid,
+        cache,
+        tau=0.5,
+        survival_clip=1e-8,
+        targeting_gbar_floor=1e-6,
+    )
+
+    expected_increment = 0.5 * 0.2 / (0.8**2) - 0.375 * 0.2 / 0.8
+    expected_cumulative = np.array([0.0, expected_increment])
+    expected_raw = np.array([0.25 / 1.0 - 0.375, 0.5 / 0.8 - 0.375]) - expected_cumulative
+
+    assert np.allclose(details["jump_times"], [0.6])
+    assert np.allclose(details["tail_truncated_mean_jump"], [0.5])
+    assert np.allclose(details["tail_rmst_jump"], [0.0])
+    assert np.allclose(details["target_constant_jump_correction"], [0.375 * 0.2 / 0.8])
+    assert np.allclose(details["jump_increments"], [expected_increment])
+    assert np.allclose(details["cumulative_jump_term_grid"], expected_cumulative)
+    assert np.allclose(raw_direction, expected_raw)
+
+
+def test_rmst_tau_one_matches_generic_mean_direction():
+    grid = np.array([0.25, 0.75])
+    delta_j = np.array([0.5, 0.5])
+    density = np.array([1.0, 1.0])
+    survival = np.array([1.0, 0.5])
+    target_grid = RCTargetGrid(
+        t0=float("nan"),
+        grid_edges=np.array([0.0, 0.5, 1.0]),
+        grid_midpoints=grid,
+        delta_j=delta_j,
+        density_grid=density,
+        log_density_grid=np.log(density),
+        survival_grid=survival,
+        edge_survival=np.array([1.0, 0.5, 0.0]),
+        t0_inserted=False,
+    )
+    cache = RCCensoringCache(
+        km=_FakeKM(np.array([0.6]), np.array([0.8])),
+        jump_times=np.array([0.6]),
+        gbar_right=np.array([0.8]),
+        gbar_left=np.array([1.0]),
+        jump_masses=np.array([0.2]),
+        clip=1e-6,
+    )
+
+    rmst_raw, rmst_centered, _ = _compute_rmst_direction_on_grid(
+        target_grid,
+        cache,
+        tau=1.0,
+        survival_clip=1e-8,
+        targeting_gbar_floor=1e-6,
+    )
+    mean_raw, mean_centered, _ = _compute_mean_direction_on_grid(
+        target_grid,
+        cache,
+        survival_clip=1e-8,
+        targeting_gbar_floor=1e-6,
+    )
+
+    assert np.allclose(rmst_raw, mean_raw)
+    assert np.allclose(rmst_centered, mean_centered)
 
 
 def test_right_censored_rmst_auto_gate_can_skip_initial_targeting():

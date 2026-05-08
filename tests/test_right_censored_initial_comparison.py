@@ -4,6 +4,7 @@ from haldensity.censoring.right.comparison import (
     fit_right_censored_initial_estimator,
     run_right_censored_initial_estimator_experiment,
     simulate_beta_uniform_right_censored,
+    simulate_truncnorm_uniform_right_censored,
 )
 from haldensity.censoring.right.observed_mle import (
     RightCensoredObservedFISTAEstimator,
@@ -43,6 +44,35 @@ def test_right_censored_observed_estimators_fit_valid_density():
         assert int(results["n_iterations_run"]) > 0
         assert "recovery_count" in results
         assert "optimization_history" in results
+
+
+def test_truncnorm_uniform_right_censored_simulator_returns_valid_truth():
+    sim = simulate_truncnorm_uniform_right_censored(
+        n=64,
+        seed=29,
+        event_mean=0.55,
+        event_sd=0.12,
+        censor_low=0.0,
+        censor_high=1.2,
+    )
+
+    observed_data = sim["observed_data"]
+    event_times = np.asarray(sim["event_times"], dtype=float)
+    truth = sim["truth"]
+    eval_points = np.array([0.0, 0.25, 0.5, 0.75, 1.0], dtype=float)
+    truth_density = np.asarray(truth.density_fn(eval_points), dtype=float)
+    truth_survival = np.asarray(truth.survival_fn(eval_points), dtype=float)
+
+    assert observed_data.shape == (64, 2)
+    assert set(observed_data.columns) == {"T", "Delta"}
+    assert np.all((event_times >= 0.0) & (event_times <= 1.0))
+    assert np.all(np.isfinite(truth_density))
+    assert np.all(truth_density >= 0.0)
+    assert np.all(np.isfinite(truth_survival))
+    assert np.all((truth_survival >= 0.0) & (truth_survival <= 1.0))
+    assert np.all(np.diff(truth_survival) <= 1e-10)
+    assert np.isclose(truth_survival[0], 1.0, atol=1e-8)
+    assert truth.name.startswith("TruncNorm(")
 
 
 def test_right_censored_observed_estimators_recover_from_one_unstable_step():

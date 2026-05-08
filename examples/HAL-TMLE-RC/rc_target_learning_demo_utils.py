@@ -13,6 +13,7 @@ from haldensity.censoring.right.comparison import (
     RightCensoredTruth,
     fit_right_censored_cv_ipcw_l1mle_plugin,
     simulate_beta_uniform_right_censored,
+    simulate_truncnorm_uniform_right_censored,
 )
 from haldensity.censoring.right.km import KaplanMeier
 from haldensity.targeting import (
@@ -27,7 +28,10 @@ TARGET_OPTIONS: tuple[str, ...] = ("Survival", "RMST", "DensitySquare", "Entropy
 DEFAULT_TARGET_GRID = np.linspace(0.1, 0.9, 9)
 DEFAULT_INTEGRATION_GRID = np.linspace(0.0, 1.0, 4001)
 DEFAULT_SIMULATION_KWARGS: dict[str, Any] = {
+    "event_dist": "beta",
     "event_beta_shape": (2.2, 2.5),
+    "event_truncnorm_mean": 0.5,
+    "event_truncnorm_sd": 0.15,
     "censor_low": 0.0,
     "censor_high": 1.2,
 }
@@ -85,26 +89,51 @@ def simulate_demo_data(
     n: int,
     *,
     seed: int = 0,
+    event_dist: str = "beta",
     event_beta_shape: tuple[float, float] = (2.2, 2.5),
+    event_truncnorm_mean: float = 0.5,
+    event_truncnorm_sd: float = 0.15,
     censor_low: float = 0.0,
     censor_high: float = 1.2,
 ) -> dict[str, Any]:
-    sim = simulate_beta_uniform_right_censored(
-        n=int(n),
-        seed=int(seed),
-        event_beta_shape=event_beta_shape,
-        censor_low=censor_low,
-        censor_high=censor_high,
-    )
+    event_dist_key = str(event_dist).strip().lower()
+    if event_dist_key == "beta":
+        sim = simulate_beta_uniform_right_censored(
+            n=int(n),
+            seed=int(seed),
+            event_beta_shape=event_beta_shape,
+            censor_low=censor_low,
+            censor_high=censor_high,
+        )
+    elif event_dist_key in {"truncnorm", "truncated_normal", "truncated-normal"}:
+        sim = simulate_truncnorm_uniform_right_censored(
+            n=int(n),
+            seed=int(seed),
+            event_mean=event_truncnorm_mean,
+            event_sd=event_truncnorm_sd,
+            censor_low=censor_low,
+            censor_high=censor_high,
+        )
+    else:
+        raise ValueError(
+            "event_dist must be one of {'beta', 'truncnorm', 'truncated_normal', 'truncated-normal'}."
+        )
     observed_data = sim["observed_data"].copy()
-    sim["diagnostics"] = {
+    diagnostics: dict[str, Any] = {
         "n_observations": int(observed_data.shape[0]),
         "uncensored_rate": float(observed_data["Delta"].mean()),
         "censoring_rate": float(1.0 - observed_data["Delta"].mean()),
-        "event_beta_shape": tuple(float(x) for x in event_beta_shape),
+        "event_dist": event_dist_key,
+        "truth_name": str(sim["truth"].name),
         "censor_low": float(censor_low),
         "censor_high": float(censor_high),
     }
+    if event_dist_key == "beta":
+        diagnostics["event_beta_shape"] = tuple(float(x) for x in event_beta_shape)
+    else:
+        diagnostics["event_truncnorm_mean"] = float(event_truncnorm_mean)
+        diagnostics["event_truncnorm_sd"] = float(event_truncnorm_sd)
+    sim["diagnostics"] = diagnostics
     return sim
 
 
@@ -518,6 +547,26 @@ def plot_score_diagnostics(
 ) -> plt.Axes:
     canonical = normalize_target_type(target_type)
     coord_col = target_coordinate_column(canonical)
+    initial_score_col = (
+        "exact_eif_mean_initial_stage"
+        if "exact_eif_mean_initial_stage" in augmented_summary.columns
+        else "eif_mean_initial_stage"
+    )
+    initial_threshold_col = (
+        "exact_threshold_initial"
+        if "exact_threshold_initial" in augmented_summary.columns
+        else "threshold_initial"
+    )
+    final_score_col = (
+        "exact_eif_mean_final"
+        if "exact_eif_mean_final" in augmented_summary.columns
+        else "eif_mean_final"
+    )
+    final_threshold_col = (
+        "exact_threshold_final"
+        if "exact_threshold_final" in augmented_summary.columns
+        else "threshold_final"
+    )
     if ax is None:
         _, ax = plt.subplots(figsize=(8, 5))
 
@@ -525,42 +574,47 @@ def plot_score_diagnostics(
         x = augmented_summary[coord_col].to_numpy(dtype=float)
         ax.plot(
             x,
-            np.abs(augmented_summary["eif_mean_initial_stage"].to_numpy(dtype=float)),
+            np.abs(augmented_summary[initial_score_col].to_numpy(dtype=float)),
             marker="o",
-            label="|EIF mean| initial",
+            label="|Exact EIF mean| initial",
         )
         ax.plot(
             x,
-            augmented_summary["threshold_initial"].to_numpy(dtype=float),
+            augmented_summary[initial_threshold_col].to_numpy(dtype=float),
             linestyle="--",
-            label="Initial threshold",
+            label="Exact threshold initial",
         )
         ax.plot(
             x,
-            np.abs(augmented_summary["eif_mean_final"].to_numpy(dtype=float)),
+            np.abs(augmented_summary[final_score_col].to_numpy(dtype=float)),
             marker="s",
-            label="|EIF mean| final",
+            label="|Exact EIF mean| final",
         )
         ax.plot(
             x,
-            augmented_summary["threshold_final"].to_numpy(dtype=float),
+            augmented_summary[final_threshold_col].to_numpy(dtype=float),
             linestyle=":",
-            label="Final threshold",
+            label="Exact threshold final",
         )
         ax.set_xlabel("t0" if canonical == "Survival" else "tau")
     else:
         row = augmented_summary.iloc[0]
-        labels = ["|EIF| initial", "threshold initial", "|EIF| final", "threshold final"]
+        labels = [
+            "|Exact EIF| initial",
+            "Exact threshold initial",
+            "|Exact EIF| final",
+            "Exact threshold final",
+        ]
         values = [
-            abs(float(row["eif_mean_initial_stage"])),
-            float(row["threshold_initial"]),
-            abs(float(row["eif_mean_final"])),
-            float(row["threshold_final"]),
+            abs(float(row[initial_score_col])),
+            float(row[initial_threshold_col]),
+            abs(float(row[final_score_col])),
+            float(row[final_threshold_col]),
         ]
         ax.bar(labels, values, color=["tab:blue", "tab:gray", "tab:orange", "tab:gray"])
 
     ax.set_ylabel("Score scale")
-    ax.set_title(f"{canonical} score diagnostics")
+    ax.set_title(f"{canonical} exact score diagnostics")
     handles, labels = ax.get_legend_handles_labels()
     if len(handles) > 0:
         ax.legend(loc="best")

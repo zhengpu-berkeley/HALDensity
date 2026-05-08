@@ -296,21 +296,35 @@ def test_right_censored_survival_targeting_v2_shape_and_stage_fields():
     required_summary_cols = {
         "sigma_over_sqrtnlogn_initial",
         "threshold_initial",
+        "exact_eif_mean_initial_stage",
+        "exact_threshold_initial",
         "passes_initial_threshold",
         "psi_one_step",
         "psi_final",
         "eif_mean_one_step",
+        "exact_eif_mean_one_step",
         "eif_mean_final",
+        "exact_eif_mean_final",
         "sigma_over_sqrtnlogn_one_step",
         "threshold_one_step",
+        "exact_threshold_one_step",
         "sigma_over_sqrtnlogn_final",
         "threshold_final",
+        "exact_threshold_final",
         "continued_past_one_step",
         "used_iterative",
         "n_iterations",
         "stop_reason",
     }
     assert required_summary_cols.issubset(set(targeted_v2["summary"].columns))
+    assert np.allclose(
+        targeted_v2["summary"]["exact_eif_mean_initial_stage"].to_numpy(dtype=float),
+        targeted_v2["summary"]["eif_mean_initial_stage"].to_numpy(dtype=float),
+    )
+    assert np.allclose(
+        targeted_v2["summary"]["exact_eif_mean_final"].to_numpy(dtype=float),
+        targeted_v2["summary"]["eif_mean_final"].to_numpy(dtype=float),
+    )
 
     for pointwise_fit in targeted_v2["pointwise_fits"]:
         assert "initial_stage" in pointwise_fit

@@ -1973,6 +1973,12 @@ def right_censored_survival_targeting_M_step_v2(
         pointwise_fits.append(fit_row)
 
     summary = pd.DataFrame(summary_rows).sort_values("t0").reset_index(drop=True)
+    summary["exact_eif_mean_initial_stage"] = summary["eif_mean_initial_stage"]
+    summary["exact_threshold_initial"] = summary["threshold_initial"]
+    summary["exact_eif_mean_one_step"] = summary["eif_mean_one_step"]
+    summary["exact_threshold_one_step"] = summary["threshold_one_step"]
+    summary["exact_eif_mean_final"] = summary["eif_mean_final"]
+    summary["exact_threshold_final"] = summary["threshold_final"]
     return {
         "targeting_points": targeting_points_arr,
         "summary": summary,

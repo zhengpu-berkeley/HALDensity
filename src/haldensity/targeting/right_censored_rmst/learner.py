@@ -135,32 +135,32 @@ def _evaluate_tail_rmst(
     return tail_num / tail_surv
 
 
-def _evaluate_inv_gbar_integral(
-    censoring_cache: RCCensoringCache,
+def _evaluate_tail_truncated_mean(
+    target_grid: RCTargetGrid,
     points: np.ndarray,
-    *,
-    targeting_gbar_floor: float,
-) -> np.ndarray:
+    tau: float,
+    survival_clip: float,
+) -> tuple[np.ndarray, np.ndarray]:
     pts = np.asarray(points, dtype=float)
-    jump_times = np.asarray(censoring_cache.jump_times, dtype=float)
-    segment_starts = np.concatenate(([0.0], jump_times))
-    segment_values = np.concatenate(
-        (
-            [1.0],
-            _evaluate_targeting_gbar(
-                censoring_cache,
-                jump_times,
-                targeting_gbar_floor=targeting_gbar_floor,
-            ),
-        )
+    truncated_time_grid = np.minimum(np.asarray(target_grid.grid_midpoints, dtype=float), float(tau))
+    tail_truncated_first_moment = np.cumsum(
+        (truncated_time_grid * target_grid.density_grid * target_grid.delta_j)[::-1]
+    )[::-1]
+    edge_tail_truncated_first_moment = np.concatenate((tail_truncated_first_moment, [0.0]))
+    tail_num = np.interp(
+        pts,
+        np.asarray(target_grid.grid_edges, dtype=float),
+        edge_tail_truncated_first_moment,
+        left=float(edge_tail_truncated_first_moment[0]),
+        right=0.0,
     )
-    cumulative_at_start = np.zeros_like(segment_starts, dtype=float)
-    if jump_times.size > 0:
-        widths = np.diff(segment_starts)
-        cumulative_at_start[1:] = np.cumsum(widths / segment_values[:-1])
-    idx = np.searchsorted(segment_starts, pts, side="right") - 1
-    idx = np.clip(idx, 0, len(segment_starts) - 1)
-    return cumulative_at_start[idx] + (pts - segment_starts[idx]) / segment_values[idx]
+    tail_surv = np.maximum(
+        _evaluate_survival(target_grid, pts, survival_clip),
+        survival_clip,
+    )
+    tail_truncated_mean = tail_num / tail_surv
+    residual_rmst = tail_truncated_mean - np.minimum(pts, float(tau))
+    return tail_truncated_mean, residual_rmst
 
 
 def _compute_rmst_direction_on_grid(
@@ -171,24 +171,27 @@ def _compute_rmst_direction_on_grid(
     targeting_gbar_floor: float,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     psi = _compute_rmst_from_target_grid(target_grid, tau)
-    cutoff_points = np.minimum(np.asarray(target_grid.grid_midpoints, dtype=float), float(tau))
+    grid = np.asarray(target_grid.grid_midpoints, dtype=float)
+    truncated_time_grid = np.minimum(grid, float(tau))
     effective_gbar_floor = float(max(targeting_gbar_floor, censoring_cache.clip))
-    first_term = _evaluate_inv_gbar_integral(
+    gbar_grid = _evaluate_targeting_gbar(
         censoring_cache,
-        cutoff_points,
+        grid,
         targeting_gbar_floor=effective_gbar_floor,
     )
+    first_term = truncated_time_grid / gbar_grid - psi
 
-    active_jump_mask = censoring_cache.jump_times <= float(tau)
-    jump_times = censoring_cache.jump_times[active_jump_mask]
-    jump_masses = censoring_cache.jump_masses[active_jump_mask]
+    jump_times = censoring_cache.jump_times
+    jump_masses = censoring_cache.jump_masses
     if jump_times.size == 0:
-        tail_rmst_jump = np.empty(0, dtype=float)
+        tail_truncated_mean_jump = np.empty(0, dtype=float)
+        residual_rmst_jump = np.empty(0, dtype=float)
         gbar_right_u = np.empty(0, dtype=float)
+        constant_jump_correction = np.empty(0, dtype=float)
         increments = np.empty(0, dtype=float)
-        cumulative_jump_term = np.zeros_like(target_grid.grid_midpoints)
+        cumulative_jump_term = np.zeros_like(grid)
     else:
-        tail_rmst_jump = _evaluate_tail_rmst(
+        tail_truncated_mean_jump, residual_rmst_jump = _evaluate_tail_truncated_mean(
             target_grid,
             jump_times,
             tau,
@@ -199,9 +202,13 @@ def _compute_rmst_direction_on_grid(
             jump_times,
             targeting_gbar_floor=effective_gbar_floor,
         )
-        increments = tail_rmst_jump * jump_masses / np.square(gbar_right_u)
+        constant_jump_correction = psi * jump_masses / gbar_right_u
+        increments = (
+            tail_truncated_mean_jump * jump_masses / np.square(gbar_right_u)
+            - constant_jump_correction
+        )
         cumulative_increments = np.cumsum(increments)
-        cutoff_idx = np.searchsorted(jump_times, cutoff_points, side="right") - 1
+        cutoff_idx = np.searchsorted(jump_times, grid, side="right") - 1
         cumulative_jump_term = np.where(
             cutoff_idx >= 0,
             cumulative_increments[np.clip(cutoff_idx, 0, len(cumulative_increments) - 1)],
@@ -225,7 +232,9 @@ def _compute_rmst_direction_on_grid(
         "gbar_jump_denom": (
             np.square(gbar_right_u) if jump_times.size > 0 else np.empty(0, dtype=float)
         ),
-        "tail_rmst_jump": tail_rmst_jump,
+        "tail_truncated_mean_jump": tail_truncated_mean_jump,
+        "tail_rmst_jump": residual_rmst_jump,
+        "target_constant_jump_correction": constant_jump_correction,
         "jump_increments": increments,
         "first_term_grid": first_term,
         "cumulative_jump_term_grid": cumulative_jump_term,
@@ -1073,6 +1082,12 @@ class RightCensoredRMSTTargetLearner:
             pointwise_fits.append(fit_row)
 
         summary = pd.DataFrame(summary_rows).sort_values("tau").reset_index(drop=True)
+        summary["exact_eif_mean_initial_stage"] = summary["eif_mean_initial_stage"]
+        summary["exact_threshold_initial"] = summary["threshold_initial"]
+        summary["exact_eif_mean_one_step"] = summary["eif_mean_one_step"]
+        summary["exact_threshold_one_step"] = summary["threshold_one_step"]
+        summary["exact_eif_mean_final"] = summary["eif_mean_final"]
+        summary["exact_threshold_final"] = summary["threshold_final"]
         return {
             "targeting_points": tau_grid,
             "summary": summary,

@@ -8,6 +8,7 @@ What this notebook does:
 - includes a batch section that demonstrates all four targets on the same simulated data set
 - includes `KM` and integrated-`KM` comparators for `Survival` and `RMST`
 - uses `CV-IPCW-L1MLE` as the initial estimator
+- defaults to beta event times on `[0, 1]`, with a switchable truncated-normal event-time DGP in `SIMULATION_KWARGS`
 - simulates censoring from `Unif[0, 1.2]`
 - uses the updated automatic targeting rule that checks the initial score before taking any TMLE step
 - uses the updated targeting `Gbar` floor of order `1 / (sqrt(n) log n)`

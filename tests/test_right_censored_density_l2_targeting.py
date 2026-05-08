@@ -99,6 +99,10 @@ def test_right_censored_density_l2_targeting_exports_and_shape():
     assert np.isclose(summary["targeting_gbar_floor_scale"], 1.0)
     assert np.isclose(targeted["metadata"]["targeting_gbar_floor"], expected_floor)
     assert targeted["pointwise_fits"][0]["target"] == "density_l2"
+    assert np.isclose(summary["exact_eif_mean_initial_stage"], summary["eif_mean_initial_stage"])
+    assert np.isclose(summary["exact_threshold_initial"], summary["threshold_initial"])
+    assert np.isclose(summary["exact_eif_mean_final"], summary["eif_mean_final"])
+    assert np.isclose(summary["exact_threshold_final"], summary["threshold_final"])
 
 
 def test_right_censored_density_l2_store_arrays_and_initial_ci_convention():
@@ -202,12 +206,14 @@ def test_density_l2_direction_no_censoring_reduces_to_centered_l2_gradient():
         survival_clip=1e-8,
     )
 
-    expected_raw = 2.0 * density
-    expected_centered = expected_raw - 2.0 * np.sum(np.square(density) * delta_j)
+    psi = np.sum(np.square(density) * delta_j)
+    expected_raw = 2.0 * density - 2.0 * psi
+    expected_centered = expected_raw
     assert np.allclose(raw_direction, expected_raw)
     assert np.allclose(centered_direction, expected_centered)
-    assert np.isclose(details["psi"], 1.25)
-    assert np.isclose(details["raw_mean"], 2.5)
+    assert np.isclose(details["psi"], psi)
+    assert np.isclose(details["psi_phi"], 2.0 * psi)
+    assert np.isclose(details["raw_mean"], 0.0)
 
 
 def test_density_l2_direction_uses_km_jump_sum():
@@ -241,11 +247,12 @@ def test_density_l2_direction_uses_km_jump_sum():
     )
 
     expected_tail_density_l2 = 1.0
-    expected_increment = 2.0 * expected_tail_density_l2 * 0.2 / (0.8**2)
+    expected_increment = 2.0 * expected_tail_density_l2 * 0.2 / (0.8**2) - 2.0 * 1.0 * 0.2 / 0.8
     expected_cumulative = np.array([0.0, expected_increment])
-    expected_raw = np.array([2.0 / 1.0, 2.0 / 0.8]) - expected_cumulative
+    expected_raw = np.array([2.0 / 1.0 - 2.0, 2.0 / 0.8 - 2.0]) - expected_cumulative
 
     assert np.allclose(details["tail_density_l2_jump"], [expected_tail_density_l2])
+    assert np.allclose(details["target_constant_jump_correction"], [2.0 * 1.0 * 0.2 / 0.8])
     assert np.allclose(details["jump_increments"], [expected_increment])
     assert np.allclose(details["cumulative_jump_term_grid"], expected_cumulative)
     assert np.allclose(raw_direction, expected_raw)
@@ -282,11 +289,12 @@ def test_density_l2_direction_respects_targeting_gbar_floor():
         targeting_gbar_floor=0.2,
     )
 
-    expected_increment = 2.0 * 1.0 * 0.99 / (0.2**2)
+    expected_increment = 2.0 * 1.0 * 0.99 / (0.2**2) - 2.0 * 1.0 * 0.99 / 0.2
     expected_cumulative = np.array([0.0, expected_increment])
-    expected_raw = np.array([2.0 / 1.0, 2.0 / 0.2]) - expected_cumulative
+    expected_raw = np.array([2.0 / 1.0 - 2.0, 2.0 / 0.2 - 2.0]) - expected_cumulative
 
     assert np.isclose(details["targeting_gbar_floor"], 0.2)
+    assert np.allclose(details["target_constant_jump_correction"], [2.0 * 1.0 * 0.99 / 0.2])
     assert np.allclose(details["jump_increments"], [expected_increment])
     assert np.allclose(details["cumulative_jump_term_grid"], expected_cumulative)
     assert np.allclose(raw_direction, expected_raw)

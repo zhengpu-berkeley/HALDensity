@@ -144,19 +144,21 @@ def _compute_density_l2_direction_on_grid(
     targeting_gbar_floor: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     psi = _compute_density_l2_from_grid(target_grid.density_grid, target_grid.delta_j)
+    psi_phi = 2.0 * psi
     effective_gbar_floor = float(max(targeting_gbar_floor, censoring_cache.clip))
     gbar_grid = _evaluate_targeting_gbar(
         censoring_cache,
         target_grid.grid_midpoints,
         targeting_gbar_floor=effective_gbar_floor,
     )
-    first_term = 2.0 * target_grid.density_grid / gbar_grid
+    first_term = 2.0 * target_grid.density_grid / gbar_grid - psi_phi
 
     jump_times = censoring_cache.jump_times
     jump_masses = censoring_cache.jump_masses
     if jump_times.size == 0:
         tail_density_l2_jump = np.empty(0, dtype=float)
         gbar_right_u = np.empty(0, dtype=float)
+        constant_jump_correction = np.empty(0, dtype=float)
         increments = np.empty(0, dtype=float)
         cumulative_jump_term = np.zeros_like(target_grid.grid_midpoints)
     else:
@@ -170,7 +172,11 @@ def _compute_density_l2_direction_on_grid(
             jump_times,
             targeting_gbar_floor=effective_gbar_floor,
         )
-        increments = 2.0 * tail_density_l2_jump * jump_masses / np.square(gbar_right_u)
+        constant_jump_correction = psi_phi * jump_masses / gbar_right_u
+        increments = (
+            2.0 * tail_density_l2_jump * jump_masses / np.square(gbar_right_u)
+            - constant_jump_correction
+        )
         cumulative_increments = np.cumsum(increments)
         cutoff_idx = np.searchsorted(jump_times, target_grid.grid_midpoints, side="right") - 1
         cumulative_jump_term = np.where(
@@ -187,6 +193,7 @@ def _compute_density_l2_direction_on_grid(
     )
     direction_details = {
         "psi": psi,
+        "psi_phi": psi_phi,
         "gbar_convention": "right_continuous",
         "stage1_ipcw_convention": "repo_default",
         "targeting_gbar_floor": effective_gbar_floor,
@@ -196,6 +203,7 @@ def _compute_density_l2_direction_on_grid(
             np.square(gbar_right_u) if jump_times.size > 0 else np.empty(0, dtype=float)
         ),
         "tail_density_l2_jump": tail_density_l2_jump,
+        "target_constant_jump_correction": constant_jump_correction,
         "jump_increments": increments,
         "first_term_grid": first_term,
         "cumulative_jump_term_grid": cumulative_jump_term,
@@ -927,6 +935,12 @@ class RightCensoredDensityL2TargetLearner:
                 }
             ]
         )
+        summary["exact_eif_mean_initial_stage"] = summary["eif_mean_initial_stage"]
+        summary["exact_threshold_initial"] = summary["threshold_initial"]
+        summary["exact_eif_mean_one_step"] = summary["eif_mean_one_step"]
+        summary["exact_threshold_one_step"] = summary["threshold_one_step"]
+        summary["exact_eif_mean_final"] = summary["eif_mean_final"]
+        summary["exact_threshold_final"] = summary["threshold_final"]
 
         fit_row: dict[str, Any] = {
             "target": "density_l2",

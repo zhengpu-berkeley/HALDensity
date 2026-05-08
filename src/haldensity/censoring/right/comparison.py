@@ -8,7 +8,7 @@ from typing import Any, Callable, Optional, Sequence
 
 import numpy as np
 import pandas as pd
-from scipy.stats import beta as beta_dist
+from scipy.stats import beta as beta_dist, truncnorm
 
 from haldensity.censoring.right.km import KaplanMeier
 from haldensity.censoring.right.metrics import incomplete_loglik, ipcw_loglik
@@ -95,6 +95,48 @@ def simulate_beta_uniform_right_censored(
         survival_fn=lambda x: beta_dist.sf(np.asarray(x, dtype=float), a, b),
         event_sampler=lambda sampler_rng, size: sampler_rng.beta(a, b, size=int(size)),
         name=f"Beta({a}, {b}) event time",
+    )
+    return {
+        "observed_data": observed_data,
+        "event_times": event_times,
+        "censor_times": censor_times,
+        "truth": truth,
+    }
+
+
+def simulate_truncnorm_uniform_right_censored(
+    n: int,
+    *,
+    seed: int = 0,
+    event_mean: float = 0.5,
+    event_sd: float = 0.15,
+    censor_low: float = 0.05,
+    censor_high: float = 0.95,
+) -> dict[str, Any]:
+    """Simulate a truncated-normal-event / uniform-censoring right-censored dataset."""
+    if event_sd <= 0.0:
+        raise ValueError("event_sd must be positive.")
+
+    rng = np.random.default_rng(seed)
+    mean = float(event_mean)
+    sd = float(event_sd)
+    a = (0.0 - mean) / sd
+    b = (1.0 - mean) / sd
+    event_dist = truncnorm(a=a, b=b, loc=mean, scale=sd)
+
+    event_times = event_dist.rvs(size=int(n), random_state=rng)
+    censor_times = rng.uniform(float(censor_low), float(censor_high), size=int(n))
+    observed_t = np.minimum(event_times, censor_times)
+    delta = (event_times <= censor_times).astype(int)
+    observed_data = pd.DataFrame({"T": observed_t, "Delta": delta})
+
+    truth = RightCensoredTruth(
+        density_fn=lambda x: event_dist.pdf(np.asarray(x, dtype=float)),
+        survival_fn=lambda x: event_dist.sf(np.asarray(x, dtype=float)),
+        event_sampler=lambda sampler_rng, size: event_dist.rvs(
+            size=int(size), random_state=sampler_rng
+        ),
+        name=f"TruncNorm(mean={mean}, sd={sd}) event time on [0, 1]",
     )
     return {
         "observed_data": observed_data,

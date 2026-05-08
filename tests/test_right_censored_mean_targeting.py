@@ -93,6 +93,10 @@ def test_right_censored_mean_targeting_exports_and_shape():
     assert np.isfinite(summary["standard_error"])
     assert np.isfinite(summary["estimand_variance"])
     assert targeted["pointwise_fits"][0]["target"] == "mean"
+    assert np.isclose(summary["exact_eif_mean_initial_stage"], summary["eif_mean_initial_stage"])
+    assert np.isclose(summary["exact_threshold_initial"], summary["threshold_initial"])
+    assert np.isclose(summary["exact_eif_mean_final"], summary["eif_mean_final"])
+    assert np.isclose(summary["exact_threshold_final"], summary["threshold_final"])
 
 
 def test_right_censored_mean_targeting_store_arrays_and_initial_ci_convention():
@@ -137,9 +141,10 @@ def test_right_censored_mean_targeting_store_arrays_and_initial_ci_convention():
     )
     eic_values = np.asarray(pointwise_fit["eic_values"], dtype=float)
     include_mask = np.asarray(pointwise_fit["clip_active_eic_include_mask"], dtype=bool)
+    expected_all_eic_se = np.sqrt(np.var(eic_values, ddof=1) / len(eic_values))
     expected_filtered_se = np.sqrt(np.var(eic_values[include_mask], ddof=1) / include_mask.sum())
     assert np.isclose(summary["standard_error_final"], expected_filtered_se)
-    assert summary["standard_error_all_eic_final"] >= summary["standard_error_final"]
+    assert np.isclose(summary["standard_error_all_eic_final"], expected_all_eic_se)
 
     default_var = right_censored_mean_estimand_variance(targeted, observed_data=data)
     initial_var = right_censored_mean_estimand_variance(
@@ -195,9 +200,9 @@ def test_right_censored_mean_direction_no_censoring_reduces_to_centered_mean_gra
     )
 
     expected_centered = grid - 0.5
-    assert np.allclose(raw_direction, grid)
+    assert np.allclose(raw_direction, expected_centered)
     assert np.allclose(centered_direction, expected_centered)
-    assert np.isclose(details["raw_mean"], 0.5)
+    assert np.isclose(details["raw_mean"], 0.0)
 
 
 def test_right_censored_mean_direction_uses_km_jump_sum():
@@ -231,11 +236,12 @@ def test_right_censored_mean_direction_uses_km_jump_sum():
         survival_clip=1e-8,
     )
 
-    expected_increment = 0.75 * 0.2 / (0.8**2)
+    expected_increment = 0.75 * 0.2 / (0.8**2) - 0.5 * 0.2 / 0.8
     expected_cumulative = np.array([0.0, expected_increment])
-    expected_raw = np.array([0.25 / 1.0, 0.75 / 0.8]) - expected_cumulative
+    expected_raw = np.array([0.25 / 1.0 - 0.5, 0.75 / 0.8 - 0.5]) - expected_cumulative
 
     assert np.allclose(details["tail_mean_jump"], [0.75])
+    assert np.allclose(details["target_constant_jump_correction"], [0.5 * 0.2 / 0.8])
     assert np.allclose(details["jump_increments"], [expected_increment])
     assert np.allclose(details["cumulative_jump_term_grid"], expected_cumulative)
     assert np.allclose(raw_direction, expected_raw)
