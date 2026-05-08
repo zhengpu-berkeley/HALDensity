@@ -62,6 +62,47 @@ class OverSmoothEMRecord:
     em_estimator: Any
 
 
+def _compute_cv_standard_error(sd_score: float, n_valid: int) -> float:
+    """Convert a fold-level SD into a standard error for the mean CV score."""
+    n = int(max(n_valid, 0))
+    if n <= 0 or not np.isfinite(sd_score):
+        return 0.0
+    return float(sd_score) / float(np.sqrt(n))
+
+
+def _compute_conservative_threshold(
+    *,
+    best_mean: float,
+    best_sd: float,
+    n_valid: int,
+    selection_rule: str,
+    k_percent: float,
+    se_multiplier: float,
+) -> tuple[float, dict[str, Any]]:
+    """Compute the conservative-selection threshold and diagnostics."""
+    rule = str(selection_rule).strip().lower()
+    if rule == "legacy_percent_sd":
+        threshold = float(best_mean - float(k_percent) * float(best_sd))
+        return threshold, {
+            "selection_rule": "legacy_percent_sd",
+            "k_percent": float(k_percent),
+            "best_sd": float(best_sd),
+            "best_standard_error": _compute_cv_standard_error(best_sd, n_valid),
+            "n_valid": int(n_valid),
+        }
+    if rule == "one_se":
+        best_se = _compute_cv_standard_error(best_sd, n_valid)
+        threshold = float(best_mean - float(se_multiplier) * best_se)
+        return threshold, {
+            "selection_rule": "one_se",
+            "se_multiplier": float(se_multiplier),
+            "best_sd": float(best_sd),
+            "best_standard_error": float(best_se),
+            "n_valid": int(n_valid),
+        }
+    raise ValueError("selection_rule must be one of {'legacy_percent_sd', 'one_se'}")
+
+
 class BaseCensoredInitTuner(ABC):
     """Abstract base class for Stage 1 (Init) hyperparameter tuners.
     
@@ -110,6 +151,8 @@ class BaseCensoredInitTuner(ABC):
         conservative_max_steps: int = TUNER_DEFAULTS.conservative_max_steps,
         conservative_step_pct: float = TUNER_DEFAULTS.conservative_step_pct,
         conservative_method: str = TUNER_DEFAULTS.conservative_method,
+        conservative_selection_rule: str = TUNER_DEFAULTS.conservative_selection_rule,
+        conservative_se_multiplier: float = TUNER_DEFAULTS.conservative_se_multiplier,
         conservative_bracket_factor: float = TUNER_DEFAULTS.conservative_bracket_factor,
         conservative_min_norm_constraint: float = TUNER_DEFAULTS.conservative_min_norm_constraint,
         silent: bool = True,
@@ -126,11 +169,19 @@ class BaseCensoredInitTuner(ABC):
         self.conservative_max_steps = int(conservative_max_steps)
         self.conservative_step_pct = float(conservative_step_pct)
         self.conservative_method = str(conservative_method)
+        self.conservative_selection_rule = str(conservative_selection_rule).strip().lower()
+        self.conservative_se_multiplier = float(conservative_se_multiplier)
         self.conservative_bracket_factor = float(conservative_bracket_factor)
         self.conservative_min_norm_constraint = float(conservative_min_norm_constraint)
         
         if self.conservative_method not in ("bisection", "linear"):
             raise ValueError("conservative_method must be one of {'bisection', 'linear'}")
+        if self.conservative_selection_rule not in ("legacy_percent_sd", "one_se"):
+            raise ValueError(
+                "conservative_selection_rule must be one of {'legacy_percent_sd', 'one_se'}"
+            )
+        if self.conservative_se_multiplier < 0.0:
+            raise ValueError("conservative_se_multiplier must be >= 0")
         if not (0.0 < self.conservative_bracket_factor < 1.0):
             raise ValueError("conservative_bracket_factor must be in (0, 1)")
         if not (0.0 < self.conservative_min_norm_constraint):
@@ -227,7 +278,8 @@ class BaseCensoredInitTuner(ABC):
         optuna_nc = float(self.optuna_params["norm_constraint"])
         basis_order = int(self.optuna_params["basis_order"])
         
-        optuna_cv_ll, optuna_cv_sd, _ = self._compute_cv_score_with_sd(optuna_nc, basis_order)
+        optuna_cv_ll, optuna_cv_sd, fold_scores = self._compute_cv_score_with_sd(optuna_nc, basis_order)
+        n_valid_scores = int(sum(np.isfinite(score) for score in fold_scores))
         if not np.isfinite(optuna_cv_ll):
             # If the "best" point is not evaluable, do not attempt adjustment.
             self.adjustment_results = [{
@@ -237,12 +289,20 @@ class BaseCensoredInitTuner(ABC):
                 "cv_sd": float(optuna_cv_sd),
                 "above_threshold": True,
                 "method": self.conservative_method,
+                "selection_rule": self.conservative_selection_rule,
                 "note": "optuna_cv_ll_nonfinite_no_adjustment",
             }]
             self.conservative_params = {"norm_constraint": float(optuna_nc), "basis_order": int(basis_order)}
             return self.conservative_params
         
-        threshold = float(optuna_cv_ll - self.conservative_k_percent * optuna_cv_sd)
+        threshold, threshold_details = _compute_conservative_threshold(
+            best_mean=float(optuna_cv_ll),
+            best_sd=float(optuna_cv_sd),
+            n_valid=n_valid_scores,
+            selection_rule=self.conservative_selection_rule,
+            k_percent=self.conservative_k_percent,
+            se_multiplier=self.conservative_se_multiplier,
+        )
         
         if self.conservative_method == "linear":
             return self._apply_conservative_adjustment_linear(
@@ -251,6 +311,7 @@ class BaseCensoredInitTuner(ABC):
                 optuna_cv_ll=float(optuna_cv_ll),
                 optuna_cv_sd=float(optuna_cv_sd),
                 threshold=threshold,
+                threshold_details=threshold_details,
             )
         return self._apply_conservative_adjustment_bisection(
             optuna_nc=optuna_nc,
@@ -258,6 +319,7 @@ class BaseCensoredInitTuner(ABC):
             optuna_cv_ll=float(optuna_cv_ll),
             optuna_cv_sd=float(optuna_cv_sd),
             threshold=threshold,
+            threshold_details=threshold_details,
         )
     
     def _apply_conservative_adjustment_linear(
@@ -267,6 +329,7 @@ class BaseCensoredInitTuner(ABC):
         optuna_cv_ll: float,
         optuna_cv_sd: float,
         threshold: float,
+        threshold_details: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Legacy linear stepping: nc = optuna_nc - step * (pct * optuna_nc)."""
         step_size = self.conservative_step_pct * optuna_nc
@@ -280,6 +343,7 @@ class BaseCensoredInitTuner(ABC):
             "above_threshold": True,
             "method": "linear",
             "threshold": float(threshold),
+            **threshold_details,
         }]
         
         for step in range(1, self.conservative_max_steps + 1):
@@ -296,6 +360,7 @@ class BaseCensoredInitTuner(ABC):
                 "above_threshold": above_threshold,
                 "method": "linear",
                 "threshold": float(threshold),
+                **threshold_details,
             })
             if above_threshold:
                 best_conservative_nc = candidate_nc
@@ -315,6 +380,7 @@ class BaseCensoredInitTuner(ABC):
         optuna_cv_ll: float,
         optuna_cv_sd: float,
         threshold: float,
+        threshold_details: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Bracket + log-bisection to find smallest nc with CV_LL >= threshold.
         
@@ -347,6 +413,7 @@ class BaseCensoredInitTuner(ABC):
                 "above_threshold": above,
                 "method": "bisection",
                 "threshold": float(threshold),
+                **threshold_details,
             })
             return mean_ll, sd_ll, above
         
@@ -476,6 +543,8 @@ class BaseCensoredInitTuner(ABC):
             "optuna_params": self.optuna_params,
             "conservative_params": self.conservative_params,
             "best_metric_value": self.best_metric_value,
+            "conservative_selection_rule": self.conservative_selection_rule,
+            "conservative_se_multiplier": self.conservative_se_multiplier,
             "study": self.study,
             "adjustment_results": self.adjustment_results,
         }

@@ -226,6 +226,29 @@ def _evaluate_gbar(cache: RCCensoringCache, t: np.ndarray | float) -> np.ndarray
     return np.maximum(vals, cache.clip)
 
 
+def _compute_targeting_gbar_floor(
+    *,
+    n_obs: int,
+    scale: Optional[float],
+    hard_min: float,
+) -> float:
+    floor = float(max(hard_min, 0.0))
+    if scale is None or scale <= 0.0 or n_obs <= 1:
+        return floor
+    adaptive_floor = float(scale / (np.sqrt(n_obs) * np.log(n_obs)))
+    return float(max(floor, adaptive_floor))
+
+
+def _evaluate_targeting_gbar(
+    cache: RCCensoringCache,
+    t: np.ndarray | float,
+    *,
+    targeting_gbar_floor: float,
+) -> np.ndarray:
+    vals = np.asarray(cache.km.predict(t), dtype=float)
+    return np.maximum(vals, float(max(targeting_gbar_floor, cache.clip)))
+
+
 def _evaluate_gbar_left(cache: RCCensoringCache, t: np.ndarray | float) -> np.ndarray:
     ts = np.asarray(t, dtype=float)
     if cache.jump_times.size == 0:
@@ -271,10 +294,18 @@ def _compute_dfg_t0_on_grid(
     censoring_cache: RCCensoringCache,
     t0: float,
     survival_clip: float,
+    targeting_gbar_floor: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     grid = target_grid.grid_midpoints
     full_gradient_grid, s_t0 = _compute_full_data_gradient_t0(target_grid, t0, survival_clip)
-    gbar_t0_right = float(_evaluate_gbar(censoring_cache, np.array([t0]))[0])
+    effective_gbar_floor = float(max(targeting_gbar_floor, censoring_cache.clip))
+    gbar_t0_right = float(
+        _evaluate_targeting_gbar(
+            censoring_cache,
+            np.array([t0]),
+            targeting_gbar_floor=effective_gbar_floor,
+        )[0]
+    )
     first_term = (grid > t0).astype(float) / gbar_t0_right
 
     active_jump_mask = censoring_cache.jump_times <= t0
@@ -287,7 +318,11 @@ def _compute_dfg_t0_on_grid(
         gbar_right_u = np.empty(0, dtype=float)
     else:
         s_u = np.maximum(_evaluate_survival(target_grid, jump_times, survival_clip), survival_clip)
-        gbar_right_u = _evaluate_gbar(censoring_cache, jump_times)
+        gbar_right_u = _evaluate_targeting_gbar(
+            censoring_cache,
+            jump_times,
+            targeting_gbar_floor=effective_gbar_floor,
+        )
         increments = s_t0 * jump_masses / (s_u * np.square(gbar_right_u))
         cumulative_increments = np.cumsum(increments)
         cutoff_points = np.minimum(grid, t0)
@@ -307,6 +342,7 @@ def _compute_dfg_t0_on_grid(
         "s_t0": s_t0,
         "gbar_convention": "right_continuous",
         "stage1_ipcw_convention": "repo_default",
+        "targeting_gbar_floor": effective_gbar_floor,
         "target_grid_augmented_with_t0": target_grid.t0_inserted,
         "gbar_t0_right": gbar_t0_right,
         "jump_times": jump_times,
@@ -913,6 +949,7 @@ def _evaluate_pointwise_state(
     state: PointwiseTMLEState,
     observed_data: pd.DataFrame,
     survival_clip: float,
+    targeting_gbar_floor: float,
 ) -> tuple[PointwiseTMLEState, dict[str, Any]]:
     target_grid = _state_to_target_grid(state)
     raw_direction, centered_direction, direction_details = _compute_dfg_t0_on_grid(
@@ -920,6 +957,7 @@ def _evaluate_pointwise_state(
         state.censoring_cache,
         state.t0,
         survival_clip,
+        targeting_gbar_floor=targeting_gbar_floor,
     )
     eif_values = _tmle_eif_values(0.0, target_grid, centered_direction, observed_data)
     eif_mean = float(np.mean(eif_values))
@@ -1039,6 +1077,7 @@ def _iterate_tmle_t0(
     t0: float,
     *,
     survival_clip: float,
+    targeting_gbar_floor: float,
     max_iter: int,
     min_abs_eps: float,
     min_score_tol: float,
@@ -1057,7 +1096,12 @@ def _iterate_tmle_t0(
     stop_reason = "max_iter"
 
     for iteration in range(1, max_iter + 1):
-        state, _ = _evaluate_pointwise_state(state, observed_data, survival_clip)
+        state, _ = _evaluate_pointwise_state(
+            state,
+            observed_data,
+            survival_clip,
+            targeting_gbar_floor,
+        )
         updated_state, update_info = _one_local_tmle_update(
             state,
             observed_data,
@@ -1095,7 +1139,12 @@ def _iterate_tmle_t0(
             break
 
         state = updated_state
-        state, _ = _evaluate_pointwise_state(state, observed_data, survival_clip)
+        state, _ = _evaluate_pointwise_state(
+            state,
+            observed_data,
+            survival_clip,
+            targeting_gbar_floor,
+        )
         raw_tolerance, tolerance = _iterative_tolerance_from_sigma(
             state.eif_sigma,
             n_obs,
@@ -1634,6 +1683,7 @@ def right_censored_survival_targeting_M_step_v2(
     min_abs_eps: float = 1e-10,
     min_score_tol: float = 1e-8,
     store_pointwise_arrays: bool = False,
+    targeting_gbar_floor_scale: Optional[float] = 1.0,
 ) -> dict[str, Any]:
     if mode not in {"auto", "one_step", "iterative"}:
         raise ValueError("mode must be one of {'auto', 'one_step', 'iterative'}.")
@@ -1645,55 +1695,126 @@ def right_censored_survival_targeting_M_step_v2(
         raise ValueError(f"observed_data is missing required columns: {sorted(missing)}")
 
     requested_mode = mode
-    mode = "iterative" if mode == "auto" else mode
     targeting_points_arr = _normalize_targeting_points(targeting_points)
     if km is None:
         km = KaplanMeier().fit(observed_data, time_col="T", delta_col="Delta")
 
     initial_fit = _build_initial_fit(initial_estimator)
     censoring_cache = _build_censoring_cache(km, clip=clip)
+    n_obs = int(observed_data.shape[0])
+    targeting_gbar_floor = _compute_targeting_gbar_floor(
+        n_obs=n_obs,
+        scale=targeting_gbar_floor_scale,
+        hard_min=clip,
+    )
 
     summary_rows: list[dict[str, Any]] = []
     pointwise_fits: list[dict[str, Any]] = []
     for t0 in targeting_points_arr:
         init_state = _initialize_pointwise_state(initial_fit, censoring_cache, float(t0))
-        init_state, _ = _evaluate_pointwise_state(init_state, observed_data, survival_clip)
+        init_state, _ = _evaluate_pointwise_state(
+            init_state,
+            observed_data,
+            survival_clip,
+            targeting_gbar_floor,
+        )
         if init_state.eif_values is None:
             raise RuntimeError("Initial iterative TMLE state is missing EIC values.")
         init_var, init_se = _estimate_eic_variance(init_state.eif_values)
-        iter_bundle = _iterate_tmle_t0(
-            initial_fit=initial_fit,
-            censoring_cache=censoring_cache,
-            observed_data=observed_data,
-            t0=float(t0),
-            survival_clip=survival_clip,
-            max_iter=1 if mode == "one_step" else max_iter,
-            min_abs_eps=min_abs_eps,
-            min_score_tol=min_score_tol,
-            eps_bracket_start=eps_bracket_start,
-            eps_bracket_growth=eps_bracket_growth,
-            eps_bracket_max=eps_bracket_max,
-            eps_fallback_bounds=eps_fallback_bounds,
+        raw_init_tolerance, threshold_initial = _iterative_tolerance_from_sigma(
+            init_state.eif_sigma,
+            n_obs,
+            min_score_tol,
         )
-        history_df: pd.DataFrame = iter_bundle["history"]
-        final_summary = iter_bundle["summary"]
-        final_state: Optional[PointwiseTMLEState] = iter_bundle["final_state"]
-        one_step_stage = _summarize_iterative_tmle_step(
-            iter_bundle,
-            step=1,
-            min_score_tol=min_score_tol,
-        )
-        final_psi = float(final_summary["psi_star"])
-        final_eif_mean = float(final_summary["eif_mean"])
-        final_var = float(final_summary["estimand_variance"])
-        final_se = float(final_summary["standard_error"])
-        final_score_at_zero = float(final_summary["score_at_zero"])
-        final_stop_reason = str(final_summary["stop_reason"])
-        final_n_iterations = int(final_summary["n_iterations"])
-        final_epsilon = float(final_summary["epsilon_last"])
-        final_score_at_solution = float(final_summary["score_at_solution_last"])
-        final_objective_at_solution = float(final_summary["objective_at_solution_last"])
-        final_solve_method = str(final_summary["solve_method_last"])
+        passes_initial_threshold = bool(abs(float(init_state.eif_mean)) <= threshold_initial)
+
+        if mode == "auto" and passes_initial_threshold:
+            history_df = pd.DataFrame()
+            final_state = init_state
+            final_summary = None
+            final_psi = float(init_state.psi_current)
+            final_eif_mean = float(init_state.eif_mean)
+            final_var = float(init_var)
+            final_se = float(init_se)
+            final_score_at_zero = float(init_state.score_at_zero)
+            final_stop_reason = "initial_score_tolerance"
+            final_n_iterations = 0
+            final_epsilon = 0.0
+            final_score_at_solution = float(init_state.score_at_zero)
+            final_solve_method = "skipped_initial_gate"
+            target_grid_init = _state_to_target_grid(init_state)
+            final_objective_at_solution = float(
+                _tmle_loglik_t0(
+                    0.0,
+                    target_grid_init,
+                    init_state.centered_direction,
+                    observed_data,
+                )
+            )
+            final_sigma = float(init_state.eif_sigma)
+            final_raw_tolerance = float(raw_init_tolerance)
+            final_threshold = float(threshold_initial)
+            final_epsilon_path: list[float] = []
+            final_eif_mean_path: list[float] = [float(init_state.eif_mean)]
+            final_sigma_path: list[float] = [float(init_state.eif_sigma)]
+            final_psi_path: list[float] = [float(init_state.psi_current)]
+            one_step_stage = {
+                "psi_star": float(init_state.psi_current),
+                "eif_mean": float(init_state.eif_mean),
+                "sigma": float(init_state.eif_sigma),
+                "estimand_variance": float(init_var),
+                "standard_error": float(init_se),
+                "sigma_over_sqrtnlogn": float(raw_init_tolerance),
+                "threshold": float(threshold_initial),
+                "epsilon": 0.0,
+                "score_at_zero": float(init_state.score_at_zero),
+                "score_at_solution": float(init_state.score_at_zero),
+                "objective_at_solution": float(final_objective_at_solution),
+                "solve_method": "skipped_initial_gate",
+                "status": "skipped_initial_gate",
+            }
+        else:
+            iter_bundle = _iterate_tmle_t0(
+                initial_fit=initial_fit,
+                censoring_cache=censoring_cache,
+                observed_data=observed_data,
+                t0=float(t0),
+                survival_clip=survival_clip,
+                targeting_gbar_floor=targeting_gbar_floor,
+                max_iter=1 if mode == "one_step" else max_iter,
+                min_abs_eps=min_abs_eps,
+                min_score_tol=min_score_tol,
+                eps_bracket_start=eps_bracket_start,
+                eps_bracket_growth=eps_bracket_growth,
+                eps_bracket_max=eps_bracket_max,
+                eps_fallback_bounds=eps_fallback_bounds,
+            )
+            history_df = iter_bundle["history"]
+            final_summary = iter_bundle["summary"]
+            final_state = iter_bundle["final_state"]
+            one_step_stage = _summarize_iterative_tmle_step(
+                iter_bundle,
+                step=1,
+                min_score_tol=min_score_tol,
+            )
+            final_psi = float(final_summary["psi_star"])
+            final_eif_mean = float(final_summary["eif_mean"])
+            final_var = float(final_summary["estimand_variance"])
+            final_se = float(final_summary["standard_error"])
+            final_score_at_zero = float(final_summary["score_at_zero"])
+            final_stop_reason = str(final_summary["stop_reason"])
+            final_n_iterations = int(final_summary["n_iterations"])
+            final_epsilon = float(final_summary["epsilon_last"])
+            final_score_at_solution = float(final_summary["score_at_solution_last"])
+            final_objective_at_solution = float(final_summary["objective_at_solution_last"])
+            final_solve_method = str(final_summary["solve_method_last"])
+            final_sigma = float(final_summary["sigma_final"])
+            final_raw_tolerance = float(final_summary["sigma_over_sqrtnlogn_final"])
+            final_threshold = float(final_summary["threshold_final"])
+            final_epsilon_path = final_summary["epsilon_path"]
+            final_eif_mean_path = final_summary["eif_mean_path"]
+            final_sigma_path = final_summary["sigma_path"]
+            final_psi_path = final_summary["psi_path"]
         continued_past_one_step = bool(final_n_iterations > 1)
 
         default_var = float(init_var)
@@ -1718,6 +1839,10 @@ def right_censored_survival_targeting_M_step_v2(
                 "target_grid_augmented_with_t0": bool(init_state.target_grid_augmented_with_t0),
                 "psi_initial_stage": float(init_state.psi_current),
                 "eif_mean_initial_stage": float(init_state.eif_mean),
+                "sigma_initial_stage": float(init_state.eif_sigma),
+                "sigma_over_sqrtnlogn_initial": float(raw_init_tolerance),
+                "threshold_initial": float(threshold_initial),
+                "passes_initial_threshold": passes_initial_threshold,
                 "estimand_variance_initial_stage": float(init_var),
                 "standard_error_initial_stage": float(init_se),
                 "psi_one_step": float(one_step_stage["psi_star"]),
@@ -1733,9 +1858,9 @@ def right_censored_survival_targeting_M_step_v2(
                 "status_one_step": str(one_step_stage["status"]),
                 "psi_final": final_psi,
                 "eif_mean_final": final_eif_mean,
-                "sigma_final": float(final_summary["sigma_final"]),
-                "sigma_over_sqrtnlogn_final": float(final_summary["sigma_over_sqrtnlogn_final"]),
-                "threshold_final": float(final_summary["threshold_final"]),
+                "sigma_final": float(final_sigma),
+                "sigma_over_sqrtnlogn_final": float(final_raw_tolerance),
+                "threshold_final": float(final_threshold),
                 "estimand_variance_final": final_var,
                 "standard_error_final": final_se,
                 "epsilon_last": final_epsilon,
@@ -1743,13 +1868,23 @@ def right_censored_survival_targeting_M_step_v2(
                 "used_iterative": continued_past_one_step,
                 "n_iterations": final_n_iterations,
                 "stop_reason": final_stop_reason,
+                "targeting_gbar_floor": float(targeting_gbar_floor),
+                "targeting_gbar_floor_scale": (
+                    float(targeting_gbar_floor_scale)
+                    if targeting_gbar_floor_scale is not None
+                    else float("nan")
+                ),
             }
         )
 
         fit_row: dict[str, Any] = {
             "t0": float(t0),
             "targeting_points": np.asarray([float(t0)], dtype=float),
-            "theta_targeting": np.asarray([final_epsilon], dtype=float),
+            "theta_targeting": (
+                np.asarray([], dtype=float)
+                if mode == "auto" and passes_initial_threshold
+                else np.asarray([final_epsilon], dtype=float)
+            ),
             "theta_selected": np.asarray(initial_fit.theta_hat, dtype=float).copy(),
             "epsilon": final_epsilon,
             "psi_init": float(init_state.psi_current),
@@ -1769,9 +1904,19 @@ def right_censored_survival_targeting_M_step_v2(
             "used_iterative": continued_past_one_step,
             "n_iterations": final_n_iterations,
             "stop_reason": final_stop_reason,
+            "targeting_gbar_floor": float(targeting_gbar_floor),
+            "targeting_gbar_floor_scale": (
+                float(targeting_gbar_floor_scale)
+                if targeting_gbar_floor_scale is not None
+                else float("nan")
+            ),
             "initial_stage": {
                 "psi": float(init_state.psi_current),
                 "eif_mean": float(init_state.eif_mean),
+                "sigma": float(init_state.eif_sigma),
+                "sigma_over_sqrtnlogn": float(raw_init_tolerance),
+                "threshold": float(threshold_initial),
+                "passes_threshold": passes_initial_threshold,
                 "estimand_variance": float(init_var),
                 "standard_error": float(init_se),
             },
@@ -1791,18 +1936,18 @@ def right_censored_survival_targeting_M_step_v2(
             "final_stage": {
                 "psi": final_psi,
                 "eif_mean": final_eif_mean,
-                "sigma": float(final_summary["sigma_final"]),
-                "sigma_over_sqrtnlogn": float(final_summary["sigma_over_sqrtnlogn_final"]),
-                "threshold": float(final_summary["threshold_final"]),
+                "sigma": float(final_sigma),
+                "sigma_over_sqrtnlogn": float(final_raw_tolerance),
+                "threshold": float(final_threshold),
                 "epsilon_last": final_epsilon,
                 "estimand_variance": final_var,
                 "standard_error": final_se,
             },
             "iteration_history": history_df.to_dict("records") if len(history_df) > 0 else [],
-            "epsilon_path": final_summary["epsilon_path"],
-            "eif_mean_path": final_summary["eif_mean_path"],
-            "sigma_path": final_summary["sigma_path"],
-            "psi_path": final_summary["psi_path"],
+            "epsilon_path": final_epsilon_path,
+            "eif_mean_path": final_eif_mean_path,
+            "sigma_path": final_sigma_path,
+            "psi_path": final_psi_path,
         }
 
         if store_pointwise_arrays:
@@ -1836,7 +1981,7 @@ def right_censored_survival_targeting_M_step_v2(
         "censoring_cache": _serialize_censoring_cache(censoring_cache),
         "metadata": {
             "api_version": "v2",
-            "mode": mode,
+            "mode": requested_mode,
             "requested_mode": requested_mode,
             "one_step_eif_gate": float(one_step_eif_gate),
             "n_targets": int(targeting_points_arr.size),
@@ -1850,8 +1995,10 @@ def right_censored_survival_targeting_M_step_v2(
             "max_iter": int(max_iter),
             "min_abs_eps": float(min_abs_eps),
             "min_score_tol": float(min_score_tol),
+            "targeting_gbar_floor": float(targeting_gbar_floor),
+            "targeting_gbar_floor_scale": targeting_gbar_floor_scale,
             "store_pointwise_arrays": bool(store_pointwise_arrays),
             "pointwise_design": True,
-            "decision_policy": "run one-step first; iterate only when needed",
+            "decision_policy": "check the initial EIF score first; target only when the initial score exceeds sigma/(sqrt(n) log n)",
         },
     }

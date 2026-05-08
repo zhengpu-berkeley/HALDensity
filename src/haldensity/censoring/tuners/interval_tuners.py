@@ -70,6 +70,8 @@ class IntervalCensoredInitTuner(BaseCensoredInitTuner):
         conservative_k_percent: float = TUNER_DEFAULTS.conservative_k_percent,
         conservative_max_steps: int = TUNER_DEFAULTS.conservative_max_steps,
         conservative_step_pct: float = TUNER_DEFAULTS.conservative_step_pct,
+        conservative_selection_rule: str = TUNER_DEFAULTS.conservative_selection_rule,
+        conservative_se_multiplier: float = TUNER_DEFAULTS.conservative_se_multiplier,
         init_knot_strategy: str = "midpoint",
         init_turnbull_tol: float = 1e-5,
         silent: bool = True,
@@ -86,6 +88,8 @@ class IntervalCensoredInitTuner(BaseCensoredInitTuner):
             conservative_k_percent=conservative_k_percent,
             conservative_max_steps=conservative_max_steps,
             conservative_step_pct=conservative_step_pct,
+            conservative_selection_rule=conservative_selection_rule,
+            conservative_se_multiplier=conservative_se_multiplier,
             silent=silent,
         )
         self.L_col = str(L_col)
@@ -365,6 +369,8 @@ class IntervalCensoredJointTuner:
         em_max_em_iter: int = 20,
         silent: bool = True,
         use_conservative_adjustment: bool = TUNER_DEFAULTS.use_conservative_adjustment,
+        conservative_selection_rule: str = TUNER_DEFAULTS.conservative_selection_rule,
+        conservative_se_multiplier: float = TUNER_DEFAULTS.conservative_se_multiplier,
         init_knot_strategy: str = "midpoint",
         init_turnbull_tol: float = 1e-5,
         L_col: str = "L",
@@ -381,6 +387,8 @@ class IntervalCensoredJointTuner:
         self.em_max_em_iter = em_max_em_iter
         self.silent = silent
         self.use_conservative_adjustment = use_conservative_adjustment
+        self.conservative_selection_rule = str(conservative_selection_rule)
+        self.conservative_se_multiplier = float(conservative_se_multiplier)
         self.init_knot_strategy = str(init_knot_strategy)
         self.init_turnbull_tol = float(init_turnbull_tol)
         self.L_col = L_col
@@ -405,6 +413,8 @@ class IntervalCensoredJointTuner:
             random_state=self.random_state,
             n_grid_points=self.n_grid_points,
             use_conservative_adjustment=self.use_conservative_adjustment,
+            conservative_selection_rule=self.conservative_selection_rule,
+            conservative_se_multiplier=self.conservative_se_multiplier,
             init_knot_strategy=self.init_knot_strategy,
             init_turnbull_tol=self.init_turnbull_tol,
             silent=self.silent,

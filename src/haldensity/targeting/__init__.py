@@ -4,3 +4,7 @@ from .moments import *
 from .median import *
 from .cdf import *
 from .right_censored_survival import *
+from .right_censored_mean import *
+from .right_censored_density_l2 import *
+from .right_censored_rmst import *
+from .right_censored_entropy import *

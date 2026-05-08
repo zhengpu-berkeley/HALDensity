@@ -131,6 +131,31 @@ def test_right_censored_method_specific_fit_interface():
     assert fit_m2.estimator.is_fitted
 
 
+def test_right_censored_init_tuner_accepts_one_se_conservative_rule():
+    data, _ = _make_data(seed=27)
+    overrides = {"basis_order": [0], "norm_constraint": {"low": 3.0, "high": 6.0, "log": False}}
+
+    fit_m2 = fit_right_censored_initial_estimator(
+        "M2",
+        data,
+        cv_folds=2,
+        n_trials=2,
+        n_grid_points=80,
+        random_state=5,
+        param_overrides=overrides,
+        init_tuner_kwargs={
+            "silent": True,
+            "use_conservative_adjustment": True,
+            "conservative_selection_rule": "one_se",
+            "conservative_se_multiplier": 1.0,
+        },
+    )
+
+    assert fit_m2.metadata["conservative_selection_rule"] == "one_se"
+    assert fit_m2.metadata["conservative_se_multiplier"] == 1.0
+    assert fit_m2.metadata["conservative_params"] is not None
+
+
 def test_right_censored_experiment_runner_supports_tmle_for_m1_to_m4():
     data, truth = _make_data(seed=31)
     target_times = np.array([0.25, 0.5])

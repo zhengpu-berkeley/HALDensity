@@ -34,6 +34,7 @@ from ._base import (
     BaseCensoredEMTuner,
     BaseCVOversmoothEMTuner,
     TuningResult,
+    _compute_conservative_threshold,
 )
 
 
@@ -107,6 +108,8 @@ class RightCensoredInitTuner(BaseCensoredInitTuner):
         conservative_k_percent: float = TUNER_DEFAULTS.conservative_k_percent,
         conservative_max_steps: int = TUNER_DEFAULTS.conservative_max_steps,
         conservative_step_pct: float = TUNER_DEFAULTS.conservative_step_pct,
+        conservative_selection_rule: str = TUNER_DEFAULTS.conservative_selection_rule,
+        conservative_se_multiplier: float = TUNER_DEFAULTS.conservative_se_multiplier,
         silent: bool = True,
         validation_metric: str = "observed_loglik",
         clip: float = 1e-6,
@@ -121,6 +124,8 @@ class RightCensoredInitTuner(BaseCensoredInitTuner):
             conservative_k_percent=conservative_k_percent,
             conservative_max_steps=conservative_max_steps,
             conservative_step_pct=conservative_step_pct,
+            conservative_selection_rule=conservative_selection_rule,
+            conservative_se_multiplier=conservative_se_multiplier,
             silent=silent,
         )
         metric = str(validation_metric).strip().lower()
@@ -369,6 +374,8 @@ class RightCensoredJointTuner:
         em_max_em_iter: int = 20,
         silent: bool = True,
         use_conservative_adjustment: bool = TUNER_DEFAULTS.use_conservative_adjustment,
+        conservative_selection_rule: str = TUNER_DEFAULTS.conservative_selection_rule,
+        conservative_se_multiplier: float = TUNER_DEFAULTS.conservative_se_multiplier,
     ):
         self.data = data.reset_index(drop=True)
         self.cv_folds = cv_folds
@@ -381,6 +388,8 @@ class RightCensoredJointTuner:
         self.em_max_em_iter = em_max_em_iter
         self.silent = silent
         self.use_conservative_adjustment = use_conservative_adjustment
+        self.conservative_selection_rule = str(conservative_selection_rule)
+        self.conservative_se_multiplier = float(conservative_se_multiplier)
         
         # Results
         self.stage1_result: Optional[TuningResult] = None
@@ -401,6 +410,8 @@ class RightCensoredJointTuner:
             random_state=self.random_state,
             n_grid_points=self.n_grid_points,
             use_conservative_adjustment=self.use_conservative_adjustment,
+            conservative_selection_rule=self.conservative_selection_rule,
+            conservative_se_multiplier=self.conservative_se_multiplier,
             silent=self.silent,
         )
         self.stage1_result = init_tuner.optimize(n_trials=self.stage1_n_trials)
@@ -731,6 +742,10 @@ class RightCensoredObservedL1Tuner:
         delta_col: str = "Delta",
         warm_start_final: bool = True,
         warm_start_cv: bool = True,
+        use_conservative_adjustment: bool = False,
+        conservative_k_percent: float = TUNER_DEFAULTS.conservative_k_percent,
+        conservative_selection_rule: str = TUNER_DEFAULTS.conservative_selection_rule,
+        conservative_se_multiplier: float = TUNER_DEFAULTS.conservative_se_multiplier,
         l1_kwargs: Optional[Dict[str, Any]] = None,
     ):
         self.data = data.reset_index(drop=True)
@@ -742,7 +757,19 @@ class RightCensoredObservedL1Tuner:
         self.delta_col = str(delta_col)
         self.warm_start_final = bool(warm_start_final)
         self.warm_start_cv = bool(warm_start_cv)
+        self.use_conservative_adjustment = bool(use_conservative_adjustment)
+        self.conservative_k_percent = float(conservative_k_percent)
+        self.conservative_selection_rule = str(conservative_selection_rule).strip().lower()
+        self.conservative_se_multiplier = float(conservative_se_multiplier)
         self.l1_kwargs = dict(l1_kwargs or {})
+        if self.conservative_selection_rule not in ("legacy_percent_sd", "one_se"):
+            raise ValueError(
+                "conservative_selection_rule must be one of {'legacy_percent_sd', 'one_se'}"
+            )
+        if self.conservative_k_percent < 0.0:
+            raise ValueError("conservative_k_percent must be >= 0")
+        if self.conservative_se_multiplier < 0.0:
+            raise ValueError("conservative_se_multiplier must be >= 0")
 
         forbidden = {"working_grid_points", "norm_constraint", "basis_order", "warm_start_theta"}
         overlap = forbidden.intersection(self.l1_kwargs)
@@ -789,6 +816,8 @@ class RightCensoredObservedL1Tuner:
         self.study: Optional[optuna.Study] = None
         self.best_params: Optional[Dict[str, Any]] = None
         self.best_metric_value: Optional[float] = None
+        self.max_cv_params: Optional[Dict[str, Any]] = None
+        self.conservative_params: Optional[Dict[str, Any]] = None
         self.path_factors_: Optional[list[float]] = None
         self.path_anchor_factor_: Optional[float] = None
 
@@ -888,6 +917,47 @@ class RightCensoredObservedL1Tuner:
             ["mean_cv_loglik", "norm_constraint_factor"],
             ascending=[False, True],
         ).iloc[0]
+
+    def _select_final_path_row(
+        self,
+        path_df: pd.DataFrame,
+    ) -> tuple[pd.Series, dict[str, Any]]:
+        best_row = self._select_best_path_row(path_df)
+        diagnostics: dict[str, Any] = {
+            "selection_mode": "max_cv_loglik",
+            "max_cv_row": best_row.to_dict(),
+            "conservative_row": None,
+            "conservative_threshold": None,
+            "conservative_threshold_details": None,
+        }
+        if not self.use_conservative_adjustment:
+            return best_row, diagnostics
+
+        threshold, threshold_details = _compute_conservative_threshold(
+            best_mean=float(best_row["mean_cv_loglik"]),
+            best_sd=float(best_row["sd_cv_loglik"]),
+            n_valid=int(best_row["n_valid_folds"]),
+            selection_rule=self.conservative_selection_rule,
+            k_percent=self.conservative_k_percent,
+            se_multiplier=self.conservative_se_multiplier,
+        )
+        valid = path_df[np.isfinite(path_df["mean_cv_loglik"])].copy()
+        conservative_rows = valid[
+            valid["mean_cv_loglik"].to_numpy(dtype=float) >= float(threshold) - 1e-12
+        ].copy()
+        if conservative_rows.empty:
+            return best_row, diagnostics
+        selected_row = conservative_rows.sort_values(
+            ["norm_constraint_factor", "mean_cv_loglik"],
+            ascending=[True, False],
+        ).iloc[0]
+        diagnostics.update({
+            "selection_mode": f"conservative_{self.conservative_selection_rule}",
+            "conservative_row": selected_row.to_dict(),
+            "conservative_threshold": float(threshold),
+            "conservative_threshold_details": threshold_details,
+        })
+        return selected_row, diagnostics
 
     def _build_fold_warm_start_theta(self, train_df: pd.DataFrame) -> Optional[np.ndarray]:
         """Fit a fold-local IPCW initializer and project it to the fixed support."""
@@ -1080,11 +1150,25 @@ class RightCensoredObservedL1Tuner:
         )
         cv_path_df = self._summarize_path_records(cv_fold_df)
         best_row = self._select_best_path_row(cv_path_df)
+        selected_row, selection_diagnostics = self._select_final_path_row(cv_path_df)
         best_factor = float(best_row["norm_constraint_factor"])
-        best_norm_constraint = best_factor * self.base_norm_constraint
-        self.best_params = {
+        self.max_cv_params = {
             "norm_constraint_factor": best_factor,
-            "norm_constraint": float(best_norm_constraint),
+            "norm_constraint": float(best_factor * self.base_norm_constraint),
+        }
+        selected_factor = float(selected_row["norm_constraint_factor"])
+        selected_norm_constraint = selected_factor * self.base_norm_constraint
+        self.conservative_params = (
+            {
+                "norm_constraint_factor": selected_factor,
+                "norm_constraint": float(selected_norm_constraint),
+            }
+            if self.use_conservative_adjustment
+            else None
+        )
+        self.best_params = {
+            "norm_constraint_factor": selected_factor,
+            "norm_constraint": float(selected_norm_constraint),
         }
         self.best_metric_value = float(best_row["mean_cv_loglik"])
 
@@ -1092,18 +1176,26 @@ class RightCensoredObservedL1Tuner:
             self.data,
             warm_start_theta=self.final_warm_start_theta,
         )
-        if best_factor not in full_estimators:
+        if selected_factor not in full_estimators:
             raise RuntimeError("Failed to recover the selected full-data CVL1MLE estimator")
-        estimator = full_estimators[best_factor]
+        estimator = full_estimators[selected_factor]
 
         metadata = {
             "best_metric_value": self.best_metric_value,
+            "selected_metric_value": float(selected_row["mean_cv_loglik"]),
             "cv_folds": self.cv_folds,
             "validation_metric": "observed_loglik",
             "working_support_size": int(self.working_grid_points.size),
             "base_norm_constraint": float(self.base_norm_constraint),
             "warm_start_final": bool(self.warm_start_final),
             "warm_start_cv": bool(self.warm_start_cv),
+            "use_conservative_adjustment": bool(self.use_conservative_adjustment),
+            "conservative_k_percent": float(self.conservative_k_percent),
+            "conservative_selection_rule": self.conservative_selection_rule,
+            "conservative_se_multiplier": float(self.conservative_se_multiplier),
+            "max_cv_params": self.max_cv_params,
+            "conservative_params": self.conservative_params,
+            "selection_diagnostics": selection_diagnostics,
             "n_cv_fold_warm_starts": int(
                 sum(theta is not None for theta in self._cv_fold_warm_start_cache.values())
             ),

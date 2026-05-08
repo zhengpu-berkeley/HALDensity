@@ -50,6 +50,8 @@ from .right import (
     mi_complete_loglik,
     ipcw_loglik,
     right_censored_observed_loglik_and_gradient,
+    fit_right_censored_cv_ipcw_l1mle_plugin,
+    fit_right_censored_cv_ipcw_l1mle_undersmoothed_plugin,
 )
 
 # Interval-censoring module
@@ -114,6 +116,8 @@ __all__ = [
     "mi_complete_loglik",
     "ipcw_loglik",
     "right_censored_observed_loglik_and_gradient",
+    "fit_right_censored_cv_ipcw_l1mle_plugin",
+    "fit_right_censored_cv_ipcw_l1mle_undersmoothed_plugin",
     "kl_divergence",
     # Result types
     "TuningResult",

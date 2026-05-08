@@ -91,7 +91,11 @@ class BaseEstimator:
 
         # If handlers are already present, clear them to avoid duplicate logs.
         if self.logger.hasHandlers():
-            self.logger.handlers.clear()
+            for handler in list(self.logger.handlers):
+                try:
+                    handler.close()
+                finally:
+                    self.logger.removeHandler(handler)
 
         # Create a file handler to write to the specified log file (overwriting previous logs).
         file_handler = logging.FileHandler(self.log_dir, mode='w')

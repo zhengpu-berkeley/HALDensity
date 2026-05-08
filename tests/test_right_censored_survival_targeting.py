@@ -290,10 +290,13 @@ def test_right_censored_survival_targeting_v2_shape_and_stage_fields():
     assert len(targeted_v2["summary"]) == 2
     assert len(targeted_v2["pointwise_fits"]) == 2
     assert targeted_v2["metadata"]["api_version"] == "v2"
-    assert targeted_v2["metadata"]["mode"] == "iterative"
+    assert targeted_v2["metadata"]["mode"] == "auto"
     assert targeted_v2["metadata"]["requested_mode"] == "auto"
 
     required_summary_cols = {
+        "sigma_over_sqrtnlogn_initial",
+        "threshold_initial",
+        "passes_initial_threshold",
         "psi_one_step",
         "psi_final",
         "eif_mean_one_step",
@@ -354,6 +357,30 @@ def test_right_censored_survival_targeting_v2_mode_one_step_matches_v1():
     assert np.all(v2_summary["n_iterations"].to_numpy() == np.array([1, 1, 1]))
     assert np.all(v2_summary["continued_past_one_step"].to_numpy(dtype=bool) == np.array([False, False, False]))
     assert np.all(v2_summary["used_iterative"].to_numpy(dtype=bool) == np.array([False, False, False]))
+
+
+def test_right_censored_survival_targeting_v2_auto_can_skip_initial_targeting():
+    data = _make_observed_data(seed=21)
+    estimator, km = _fit_initial_estimator(data)
+
+    targeted_v2 = right_censored_survival_targeting_M_step_v2(
+        initial_estimator=estimator,
+        observed_data=data,
+        targeting_points=np.array([0.25, 0.5, 0.75]),
+        km=km,
+        mode="auto",
+        min_score_tol=np.inf,
+        store_pointwise_arrays=False,
+    )
+    summary = targeted_v2["summary"].sort_values("t0").reset_index(drop=True)
+
+    assert np.all(summary["n_iterations"].to_numpy(dtype=int) == np.array([0, 0, 0]))
+    assert np.all(summary["status_one_step"] == "skipped_initial_gate")
+    assert np.allclose(summary["psi_init"].to_numpy(), summary["psi_final"].to_numpy())
+    assert np.allclose(
+        summary["eif_mean_initial_stage"].to_numpy(),
+        summary["eif_mean_final"].to_numpy(),
+    )
 
 
 def test_right_censored_survival_targeting_v2_step_one_matches_final_when_it_stops():

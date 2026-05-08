@@ -405,6 +405,48 @@ def test_right_cv_observed_l1_estimator_produces_valid_density() -> None:
     assert 0.85 <= area <= 1.15
 
 
+def test_right_cv_observed_l1_conservative_selection_uses_smallest_legacy_percent_sd_factor() -> None:
+    data = _make_right_censored_data(n=100, seed=23)
+    stage1 = _fit_stage1_right(data)
+    tuner = RightCensoredObservedL1Tuner(
+        data,
+        stage1_estimator=stage1,
+        cv_folds=2,
+        norm_constraint_factors=[1.0, 1.1, 1.2],
+        random_state=42,
+        silent=True,
+        use_conservative_adjustment=True,
+        conservative_k_percent=0.05,
+        conservative_selection_rule="legacy_percent_sd",
+        l1_kwargs={
+            "n_grid_points": 80,
+            "learning_rate": 0.1,
+            "n_iterations": 20,
+            "ll_change_tol": 1e-3,
+            "history_every": 10,
+        },
+    )
+
+    path_df = pd.DataFrame(
+        {
+            "norm_constraint_factor": [1.0, 1.1, 1.2],
+            "norm_constraint": [10.0, 11.0, 12.0],
+            "mean_cv_loglik": [10.24, 10.29, 10.30],
+            "sd_cv_loglik": [0.10, 0.10, 0.30],
+            "n_valid_folds": [5, 5, 5],
+        }
+    )
+
+    selected_row, diagnostics = tuner._select_final_path_row(path_df)
+
+    assert float(selected_row["norm_constraint_factor"]) == pytest.approx(1.1)
+    assert diagnostics["selection_mode"] == "conservative_legacy_percent_sd"
+    assert diagnostics["conservative_threshold"] == pytest.approx(
+        10.30 - 0.05 * 0.30
+    )
+    assert diagnostics["conservative_row"]["norm_constraint_factor"] == pytest.approx(1.1)
+
+
 def test_cv_oversmooth_returns_valid_result_and_metadata() -> None:
     data = _make_interval_censored_data()
     stage1 = _fit_stage1_interval(data)
